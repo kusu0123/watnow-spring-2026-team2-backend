@@ -1,20 +1,36 @@
 package main
 
 import (
-	"fmt"
+	"net/http"
+	"github.com/gin-gonic/gin"
+	"github.com/watnow/watnow-spring-2026-team2-backend/models"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
-	"github.com/watnow/watnow-spring-2026-team2-backend/models" // 手順1のモジュール名に合わせる
 )
 
 func main() {
 	db, err := gorm.Open(sqlite.Open("onigokko.db"), &gorm.Config{})
 	if err != nil {
-		panic("failed to connect database")
+		panic("DB接続失敗")
 	}
-
-	// テーブル作成
 	db.AutoMigrate(&models.Room{}, &models.Player{})
 
-	fmt.Println("Database connection and migration successful!")
+	r := gin.Default()
+
+	r.POST("/rooms", func(c *gin.Context) {
+		room := models.Room{
+			ID:        models.GenerateRoomID(), // models/room.goで作った関数
+			Status:    0,
+			TimeLimit: 900,
+		}
+
+		if err := db.Create(&room).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+
+		c.JSON(http.StatusCreated, room)
+	})
+
+	r.Run(":8080")
 }
