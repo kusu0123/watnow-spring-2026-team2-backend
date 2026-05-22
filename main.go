@@ -2,8 +2,10 @@ package main
 
 import (
 	"net/http"
+
 	"github.com/gin-gonic/gin"
 	"github.com/watnow/watnow-spring-2026-team2-backend/models"
+	"github.com/watnow/watnow-spring-2026-team2-backend/ws"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
@@ -16,6 +18,8 @@ func main() {
 	db.AutoMigrate(&models.Room{}, &models.Player{})
 
 	r := gin.Default()
+
+	r.GET("/ws/rooms/:id", ws.ServeWs)
 
 	r.POST("/rooms", func(c *gin.Context) {
 		room := models.Room{
