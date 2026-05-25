@@ -7,6 +7,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	"github.com/watnow/watnow-spring-2026-team2-backend/models"
+	"gorm.io/gorm"
 )
 
 var upgrader = websocket.Upgrader{
@@ -120,8 +122,19 @@ func (room *RoomState) Broadcast(msg interface{}) {
 	}
 }
 
-func ServeWs(c *gin.Context) {
+func ServeWs(c *gin.Context, db *gorm.DB) {
 	roomID := c.Param("id")
+
+	// Check if room exists in database
+	var room models.Room
+	if err := db.First(&room, "id = ?", roomID).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			http.Error(c.Writer, "Room not found", http.StatusNotFound)
+			return
+		}
+		http.Error(c.Writer, "Database error", http.StatusInternalServerError)
+		return
+	}
 
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {

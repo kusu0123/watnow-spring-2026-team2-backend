@@ -19,7 +19,9 @@ func main() {
 
 	r := gin.Default()
 
-	r.GET("/ws/rooms/:id", ws.ServeWs)
+	r.GET("/ws/rooms/:id", func(c *gin.Context) {
+		ws.ServeWs(c, db)
+	})
 
 	r.POST("/rooms", func(c *gin.Context) {
 		room := models.Room{
