@@ -54,15 +54,20 @@ func main() {
 			return
 		}
 
-		// DBの更新（Updatesを使用すると指定したフィールドだけを更新できます）
-		if err := db.Model(&models.Room{}).Where("id = ?", roomID).Updates(models.Room{
-			TimeLimit:    input.TimeLimit,
-			OniCount:     input.OniCount,
-			AreaSize:     input.AreaSize,
-			SyncInterval: input.SyncInterval,
-			GracePeriod:  input.GracePeriod,
-		}).Error; err != nil {
+		// DBの更新（0値も更新したいので map で Updates する）
+		tx := db.Model(&models.Room{}).Where("id = ?", roomID).Updates(map[string]interface{}{
+			"time_limit":     input.TimeLimit,
+			"oni_count":      input.OniCount,
+			"area_size":      input.AreaSize,
+			"sync_interval":  input.SyncInterval,
+			"grace_period":   input.GracePeriod,
+		})
+		if tx.Error != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "設定の保存に失敗しました"})
+			return
+		}
+		if tx.RowsAffected == 0 {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Room not found"})
 			return
 		}
 
