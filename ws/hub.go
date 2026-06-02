@@ -278,11 +278,10 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				for range ticker.C {
 
 					r.mu.RLock()
-					if r.Status == 2 { // ゲームが終了していたらループを抜ける
+					if r.Status != 1 || len(r.Clients) == 0 { // ゲーム停止 or 部屋が空なら終了
 						r.mu.RUnlock()
 						break
 					}
-
 					var locs []LocationVal
 					for c := range r.Clients {
 						c.mu.Lock()
