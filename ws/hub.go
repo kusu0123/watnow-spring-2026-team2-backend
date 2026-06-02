@@ -216,11 +216,24 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 			room.Status = 1
 			room.IsGMLoopActive = true
 
-			// 鬼の人数（oni_count）に基づいて役割を割り当て
+			// 鬼の人数（oni_count）を正規化して役割を割り当て
+			playerCount := len(room.Clients)
+			oniCount := room.OniCount
+			if playerCount == 0 {
+				oniCount = 0
+			} else {
+				if oniCount < 1 {
+					oniCount = 1
+				}
+				if oniCount > playerCount {
+					oniCount = playerCount
+				}
+			}
+
 			oniAssigned := 0
 			for c := range room.Clients {
 				c.mu.Lock()
-				if oniAssigned < room.OniCount {
+				if oniAssigned < oniCount {
 					c.Role = 1 // 鬼
 					oniAssigned++
 				} else {
