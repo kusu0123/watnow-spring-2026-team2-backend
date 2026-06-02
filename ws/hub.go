@@ -246,20 +246,36 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 
 			// ▼▼ GM機能：非同期で時間を管理するゴルーチン ▼▼
 			go func(r *RoomState) {
-				// 1. 逃走猶予時間の待機（※開発テストがしやすいように一旦「秒」で計算しています。本番は * time.Minute に変更）
-				time.Sleep(time.Duration(r.GracePeriod) * time.Second)
+				// ゴルーチン終了時に次回 start を許可
+				defer func() {
+					r.mu.Lock()
+					r.IsGMLoopActive = false
+					r.mu.Unlock()
+				}()
+
+				r.mu.RLock()
+				gracePeriod := r.GracePeriod
+				syncInterval := r.SyncInterval
+				r.mu.RUnlock()
+
+				if gracePeriod < 0 {
+					gracePeriod = 0
+				}
+				if syncInterval <= 0 {
+					syncInterval = 1
+				}
+
+				// 1. 逃走猶予時間の待機（分）
+				time.Sleep(time.Duration(gracePeriod) * time.Minute)
 
 				// 猶予終了・本編開始を全員に通知
-				r.Broadcast(OutgoingMessage{
-					Event: "game_active",
-				})
+				r.Broadcast(OutgoingMessage{Event: "game_active"})
 
-				// 2. マップ更新の定期実行（※こちらもテスト用に一旦「秒」にしています）
-				ticker := time.NewTicker(time.Duration(r.SyncInterval) * time.Second)
+				// 2. マップ更新の定期実行（分）
+				ticker := time.NewTicker(time.Duration(syncInterval) * time.Minute)
 				defer ticker.Stop()
 
-				for {
-					<-ticker.C // インターバルの時間が来るたびに通過
+				for range ticker.C {
 
 					r.mu.RLock()
 					if r.Status == 2 { // ゲームが終了していたらループを抜ける
