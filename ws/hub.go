@@ -50,6 +50,7 @@ type IncomingMessage struct {
 	UserID   string  `json:"user_id,omitempty"`
 	Name     string  `json:"name,omitempty"`
 	TargetID string  `json:"target_id,omitempty"`
+	Approved bool    `json:"approved,omitempty"` // 追加：逃走者からの「はい(true)/いいえ(false)」
 	Lat      float64 `json:"lat,omitempty"`
 	Lng      float64 `json:"lng,omitempty"`
 }
@@ -60,6 +61,8 @@ type OutgoingMessage struct {
 	Role      *int          `json:"role,omitempty"`
 	TimeLimit int           `json:"time_limit,omitempty"`
 	TargetID  string        `json:"target_id,omitempty"`
+	AttackerName string        `json:"attacker_name,omitempty"` // 追加：誰に捕まえられそうか
+	Approved     bool          `json:"approved,omitempty"`      // 追加：最終的な判定結果
 	Locations []LocationVal `json:"locations,omitempty"`
 }
 
@@ -244,11 +247,42 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				Locations: locs,
 			})
 
-		case "capture":
-			room.mu.Lock()
+		// --- 1歩目：鬼からの確保申請 ---
+		case "capture_request":
+			room := GameHub.GetOrCreateRoom(roomID)
+			room.mu.RLock()
+			var targetClient *Client
+		
+			// ターゲットのClientを探す
 			for c := range room.Clients {
-				c.mu.Lock()
 				if c.UserID == msg.TargetID {
+					targetClient = c
+					break
+				}
+			}
+			room.mu.RUnlock()
+
+			if targetClient != nil {
+				// 2歩目：ターゲット（逃走者）だけに確認通知を個別送信
+				targetClient.mu.Lock()
+				_ = targetClient.Conn.WriteJSON(OutgoingMessage{
+				Event:        "capture_checking",
+				AttackerName: client.Name, // 申請した人（鬼）の名前
+				})
+				targetClient.mu.Unlock()
+			}
+
+		// --- 3歩目：逃走者からの回答 ---
+		case "capture_response":
+			room := GameHub.GetOrCreateRoom(roomID)
+		
+			if msg.Approved {
+				// 4歩目（承認時）：ステータスを確定させて全員に通知
+				room.mu.Lock()
+				for c := range room.Clients {
+					c.mu.Lock()
+					// 回答した本人（ターゲット）のステータスを更新
+					if c.UserID == client.UserID {
 					c.IsCaught = true
 				}
 				c.mu.Unlock()
@@ -257,8 +291,16 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 
 			room.Broadcast(OutgoingMessage{
 				Event:    "captured",
-				TargetID: msg.TargetID,
+				TargetID: client.UserID,
+				Approved: true,
 			})
+			} else {
+				// 4歩目（拒否時）：不成立だったことを全員（または鬼）に通知
+				room.Broadcast(OutgoingMessage{
+				Event:    "capture_denied",
+				TargetID: client.UserID,
+				})
+			}
 		}
 	}
 }
