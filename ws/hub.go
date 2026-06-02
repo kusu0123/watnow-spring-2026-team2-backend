@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"sync"
-
+	"time" // 追加（Goroutineのタイマー処理で使います）
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/watnow/watnow-spring-2026-team2-backend/models"
@@ -32,7 +32,11 @@ type Client struct {
 type RoomState struct {
 	Status    int
 	TimeLimit int
-	Clients   map[*Client]bool
+	OniCount       int  // 追加
+	SyncInterval   int  // 追加
+	GracePeriod    int  // 追加
+	Clients        map[*Client]bool
+	IsGMLoopActive bool // 追加：GMの重複起動防止
 	mu        sync.RWMutex
 }
 
@@ -71,6 +75,16 @@ type LocationVal struct {
 	Lat      float64 `json:"lat"`
 	Lng      float64 `json:"lng"`
 	IsCaught bool    `json:"is_caught"`
+}
+
+func (h *Hub) UpdateRoomSettings(roomID string, timeLimit, oniCount, syncInterval, gracePeriod int) {
+	room := h.GetOrCreateRoom(roomID)
+	room.mu.Lock()
+	defer room.mu.Unlock()
+	room.TimeLimit = timeLimit
+	room.OniCount = oniCount
+	room.SyncInterval = syncInterval
+	room.GracePeriod = gracePeriod
 }
 
 func (h *Hub) GetOrCreateRoom(roomID string) *RoomState {
@@ -195,20 +209,41 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 
 		case "start":
 			room.mu.Lock()
+			if room.Status == 1 || room.IsGMLoopActive {
+				room.mu.Unlock()
+				continue // 既に始まっている場合は無視
+			}
 			room.Status = 1
-			isFirst := true
+			room.IsGMLoopActive = true
+
+			// 鬼の人数（oni_count）を正規化して役割を割り当て
+			playerCount := len(room.Clients)
+			oniCount := room.OniCount
+			if playerCount == 0 {
+				oniCount = 0
+			} else {
+				if oniCount < 1 {
+					oniCount = 1
+				}
+				if oniCount > playerCount {
+					oniCount = playerCount
+				}
+			}
+
+			oniAssigned := 0
 			for c := range room.Clients {
 				c.mu.Lock()
-				if isFirst {
-					c.Role = 1
-					isFirst = false
+				if oniAssigned < oniCount {
+					c.Role = 1 // 鬼
+					oniAssigned++
 				} else {
-					c.Role = 0
+					c.Role = 0 // 逃走者
 				}
 				c.mu.Unlock()
 			}
 			room.mu.Unlock()
 
+			// 開始通知（フロントエンド側はこの通知で猶予時間のカウントダウンUIを出す）
 			room.mu.RLock()
 			for c := range room.Clients {
 				c.mu.Lock()
@@ -222,30 +257,71 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 			}
 			room.mu.RUnlock()
 
+			// ▼▼ GM機能：非同期で時間を管理するゴルーチン ▼▼
+			go func(r *RoomState) {
+				// ゴルーチン終了時に次回 start を許可
+				defer func() {
+					r.mu.Lock()
+					r.IsGMLoopActive = false
+					r.mu.Unlock()
+				}()
+
+				r.mu.RLock()
+				gracePeriod := r.GracePeriod
+				syncInterval := r.SyncInterval
+				r.mu.RUnlock()
+
+				if gracePeriod < 0 {
+					gracePeriod = 0
+				}
+				if syncInterval <= 0 {
+					syncInterval = 1
+				}
+
+				// 1. 逃走猶予時間の待機（分）
+				time.Sleep(time.Duration(gracePeriod) * time.Minute)
+
+				// 猶予終了・本編開始を全員に通知
+				r.Broadcast(OutgoingMessage{Event: "game_active"})
+
+				// 2. マップ更新の定期実行（分）
+				ticker := time.NewTicker(time.Duration(syncInterval) * time.Minute)
+				defer ticker.Stop()
+
+				for range ticker.C {
+
+					r.mu.RLock()
+					if r.Status != 1 || len(r.Clients) == 0 { // ゲーム停止 or 部屋が空なら終了
+						r.mu.RUnlock()
+						break
+					}
+					var locs []LocationVal
+					for c := range r.Clients {
+						c.mu.Lock()
+						locs = append(locs, LocationVal{
+							UserID:   c.UserID,
+							Lat:      c.Lat,
+							Lng:      c.Lng,
+							IsCaught: c.IsCaught,
+						})
+						c.mu.Unlock()
+					}
+					r.mu.RUnlock()
+
+					// インターバル経過時のみ一斉送信
+					r.Broadcast(OutgoingMessage{
+						Event:     "sync",
+						Locations: locs,
+					})
+				}
+			}(room)
+
 		case "move":
 			client.mu.Lock()
 			client.Lat = msg.Lat
 			client.Lng = msg.Lng
 			client.mu.Unlock()
-
-			room.mu.RLock()
-			var locs []LocationVal
-			for c := range room.Clients {
-				c.mu.Lock()
-				locs = append(locs, LocationVal{
-					UserID:   c.UserID,
-					Lat:      c.Lat,
-					Lng:      c.Lng,
-					IsCaught: c.IsCaught,
-				})
-				c.mu.Unlock()
-			}
-			room.mu.RUnlock()
-
-			room.Broadcast(OutgoingMessage{
-				Event:     "sync",
-				Locations: locs,
-			})
+			// ※ Broadcast（一斉送信）は削除し、メモリの更新のみを行う
 
 		// --- 1歩目：鬼からの確保申請 ---
 		case "capture_request":
