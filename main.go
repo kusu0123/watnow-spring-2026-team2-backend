@@ -15,8 +15,21 @@ func main() {
 	if err != nil {
 		panic("DB接続失敗")
 	}
-	db.AutoMigrate(&models.Room{}, &models.Player{})
 
+	sqlDB, err := db.DB()
+	if err != nil {
+		panic("データベースの取得に失敗しました")
+	}
+	
+	// SQLiteは同時書き込みに弱いため、最大接続数を1にしてロックエラーを防ぐ
+	sqlDB.SetMaxOpenConns(1)
+	
+	// サーバー終了時に、確実にデータベースの接続を閉じて後片付けする
+	defer sqlDB.Close()
+
+	if err := db.AutoMigrate(&models.Room{}, &models.Player{}); err != nil {
+        panic("DBマイグレーション失敗: " + err.Error())
+    }
 	r := gin.Default()
 
 	r.GET("/ws/rooms/:id", func(c *gin.Context) {
