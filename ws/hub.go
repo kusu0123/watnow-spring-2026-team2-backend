@@ -69,6 +69,7 @@ type IncomingMessage struct {
 
 type OutgoingMessage struct {
 	Event        string        `json:"event"`
+	Message      string        `json:"message,omitempty"`
 	Players      []string      `json:"players,omitempty"`
 	Role         *int          `json:"role,omitempty"`
 	TimeLimit    int           `json:"time_limit,omitempty"`
@@ -85,6 +86,7 @@ type LocationVal struct {
 	Lat      float64 `json:"lat"`
 	Lng      float64 `json:"lng"`
 	IsCaught bool    `json:"is_caught"`
+	Color    string  `json:"color"`
 }
 
 type ResultVal struct {
@@ -109,6 +111,15 @@ func cleanGameSettings(timeLimit, syncInterval, gracePeriod int) (int, int, int)
 		gracePeriod = 0
 	}
 	return timeLimit, syncInterval, gracePeriod
+}
+
+func sendError(client *Client, message string) {
+	client.mu.Lock()
+	_ = client.Conn.WriteJSON(OutgoingMessage{
+		Event:   "error",
+		Message: message,
+	})
+	client.mu.Unlock()
 }
 
 func (h *Hub) UpdateRoomSettings(roomID string, timeLimit, oniCount, syncInterval, gracePeriod int) {
@@ -218,6 +229,7 @@ func (room *RoomState) locations() []LocationVal {
 			Lat:      client.Lat,
 			Lng:      client.Lng,
 			IsCaught: client.IsCaught,
+			Color:    client.Color,
 		})
 		client.mu.Unlock()
 	}
@@ -430,6 +442,7 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 
 		var msg IncomingMessage
 		if err := json.Unmarshal(messageData, &msg); err != nil {
+			sendError(client, "送信データの形式が正しくありません")
 			continue
 		}
 
@@ -444,6 +457,7 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 		switch msg.Action {
 		case "join":
 			if msg.UserID == "" {
+				sendError(client, "ユーザーIDがありません")
 				continue
 			}
 
@@ -458,9 +472,11 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 					Color:  msg.Color,
 				}
 				if err := db.Create(&player).Error; err != nil {
+					sendError(client, "プレイヤー情報の保存に失敗しました")
 					continue
 				}
 			} else if err != nil {
+				sendError(client, "プレイヤー情報の保存に失敗しました")
 				continue
 			} else {
 				updates := map[string]interface{}{}
@@ -474,6 +490,7 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				}
 				if len(updates) > 0 {
 					if err := db.Model(&models.Player{}).Where("room_id = ? AND user_id = ?", roomID, msg.UserID).Updates(updates).Error; err != nil {
+						sendError(client, "プレイヤー情報の保存に失敗しました")
 						continue
 					}
 				}
@@ -511,7 +528,8 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 			room.mu.Lock()
 			if room.Status != 0 || room.IsGMLoopActive {
 				room.mu.Unlock()
-				continue // 既に始まっている場合は無視
+				sendError(client, "ゲームはすでに開始しています")
+				continue
 			}
 			room.TimeLimit, room.SyncInterval, room.GracePeriod = cleanGameSettings(room.TimeLimit, room.SyncInterval, room.GracePeriod)
 			room.Status = 1
@@ -583,20 +601,31 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 
 		case "move":
 			client.mu.Lock()
+			if client.UserID == "" {
+				client.mu.Unlock()
+				sendError(client, "先に入室してください")
+				continue
+			}
 			client.Lat = msg.Lat
 			client.Lng = msg.Lng
 			userID := client.UserID
 			client.mu.Unlock()
-			if userID != "" {
-				_ = db.Model(&models.Player{}).Where("room_id = ? AND user_id = ?", roomID, userID).Updates(map[string]interface{}{
-					"lat": msg.Lat,
-					"lng": msg.Lng,
-				}).Error
+			if err := db.Model(&models.Player{}).Where("room_id = ? AND user_id = ?", roomID, userID).Updates(map[string]interface{}{
+				"lat": msg.Lat,
+				"lng": msg.Lng,
+			}).Error; err != nil {
+				sendError(client, "プレイヤー情報の保存に失敗しました")
+				continue
 			}
 			// ※ Broadcast（一斉送信）は削除し、メモリの更新のみを行う
 
 		// --- 1歩目：鬼からの確保申請 ---
 		case "capture_request":
+			if msg.TargetID == "" {
+				sendError(client, "捕まえる相手が見つかりません")
+				continue
+			}
+
 			room := GameHub.GetOrCreateRoom(roomID)
 			room.mu.RLock()
 			var targetClient *Client
@@ -625,6 +654,8 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 					AttackerName: attackerName, // 申請した人（鬼）の名前
 				})
 				targetClient.mu.Unlock()
+			} else {
+				sendError(client, "捕まえる相手が見つかりません")
 			}
 
 		// --- 3歩目：逃走者からの回答 ---
@@ -639,7 +670,10 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				client.mu.Unlock()
 
 				if targetID != "" {
-					_ = db.Model(&models.Player{}).Where("room_id = ? AND user_id = ?", roomID, targetID).Update("is_caught", true).Error
+					if err := db.Model(&models.Player{}).Where("room_id = ? AND user_id = ?", roomID, targetID).Update("is_caught", true).Error; err != nil {
+						sendError(client, "プレイヤー情報の保存に失敗しました")
+						continue
+					}
 				}
 
 				room.Broadcast(OutgoingMessage{
@@ -658,6 +692,8 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 					TargetID: targetID,
 				})
 			}
+		default:
+			sendError(client, "対応していない操作です")
 		}
 	}
 }
