@@ -17,9 +17,9 @@ type Room struct {
 	Players      []Player  `gorm:"foreignKey:RoomID" json:"players,omitempty"`
 }
 
-// 4桁のランダムな英数字を生成する関数
+// 4桁のランダムな数字を生成する関数
 func GenerateRoomID() string {
-	const charset = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+	const charset = "0123456789"
 	// 実行するたびに異なる乱数が出るように現在時刻をシード値に使う
 	seed := rand.NewSource(time.Now().UnixNano())
 	random := rand.New(seed)
