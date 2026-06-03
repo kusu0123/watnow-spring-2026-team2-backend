@@ -37,7 +37,7 @@ func main() {
 
 		c.JSON(http.StatusCreated, room)
 	})
-	
+
 	r.PUT("/rooms/:id", func(c *gin.Context) {
 		roomID := c.Param("id")
 
@@ -49,18 +49,41 @@ func main() {
 			GracePeriod  int    `json:"grace_period"`
 		}
 
+		// 1. まずJSONを受け取る（データを変数 input に入れる）
 		if err := c.ShouldBindJSON(&input); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "無効なデータ形式です"})
 			return
 		}
 
+		// 2. その後で、受け取ったデータの中身をチェックする
+		if input.TimeLimit < 1 || input.TimeLimit > 3600 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "制限時間は1〜3600の間で設定してください"})
+			return
+		}
+		if input.OniCount < 1 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "鬼の人数は1人以上にしてください"})
+			return
+		}
+		if input.SyncInterval < 1 || input.SyncInterval > 60 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "更新頻度は1〜60の間で設定してください"})
+			return
+		}
+		if input.GracePeriod < 0 || input.GracePeriod > 300 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "猶予時間は0〜300の間で設定してください"})
+			return
+		}
+		if len(input.AreaSize) > 50 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "エリアの文字数が長すぎます"})
+			return
+		}
+		
 		// DBの更新（0値も更新したいので map で Updates する）
 		tx := db.Model(&models.Room{}).Where("id = ?", roomID).Updates(map[string]interface{}{
-			"time_limit":     input.TimeLimit,
-			"oni_count":      input.OniCount,
-			"area_size":      input.AreaSize,
-			"sync_interval":  input.SyncInterval,
-			"grace_period":   input.GracePeriod,
+			"time_limit":    input.TimeLimit,
+			"oni_count":     input.OniCount,
+			"area_size":     input.AreaSize,
+			"sync_interval": input.SyncInterval,
+			"grace_period":  input.GracePeriod,
 		})
 		if tx.Error != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "設定の保存に失敗しました"})

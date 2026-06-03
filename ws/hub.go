@@ -3,6 +3,7 @@ package ws
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"sort"
 	"sync"
@@ -114,7 +115,11 @@ func cleanGameSettings(timeLimit, syncInterval, gracePeriod int) (int, int, int)
 }
 
 func sendError(client *Client, message string) {
+	// ▼ サーバー側（ターミナル）にログを出力
 	client.mu.Lock()
+	log.Printf("[Error] Room: %s | User: %s | Message: %s\n", client.RoomID, client.UserID, message)
+	
+	// ユーザー（スマホやPC）にエラーメッセージを送信
 	_ = client.Conn.WriteJSON(OutgoingMessage{
 		Event:   "error",
 		Message: message,
@@ -461,6 +466,17 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				continue
 			}
 
+			if len(msg.Name) == 0 || len(msg.Name) > 20 {
+				sendError(client, "名前は1文字以上、20文字以下にしてください")
+				continue
+			}
+			
+			// カラーコード（例: #FF0000）の簡易チェック：7文字で「#」から始まるか
+			if msg.Color != "" && (len(msg.Color) != 7 || msg.Color[0] != '#') {
+				sendError(client, "カラーの形式が不正です（例: #FF0000）")
+				continue
+			}
+
 			var player models.Player
 			err := db.Where("room_id = ? AND user_id = ?", roomID, msg.UserID).First(&player).Error
 			if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -600,6 +616,12 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 			go runGameLoop(roomID, room, db)
 
 		case "move":
+			if msg.Lat < -90 || msg.Lat > 90 || msg.Lng < -180 || msg.Lng > 180 {
+				// 異常な座標の場合は保存せずに無視する。
+				// 必要であればここで client.Conn.WriteJSON() を使ってエラーを返しても良いですが、
+				// moveは高頻度で飛んでくるため、サーバー側で静かにドロップ（破棄）するのが一般的です。
+				continue
+			}
 			client.mu.Lock()
 			if client.UserID == "" {
 				client.mu.Unlock()
@@ -628,13 +650,31 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 
 			room := GameHub.GetOrCreateRoom(roomID)
 			room.mu.RLock()
+
+			if room.Status != 1 {
+                room.mu.RUnlock()
+                sendError(client, "ゲーム中ではありません")
+                continue
+            }
+
+            client.mu.Lock()
+            isAttackerOni := client.Role == 1
+            attackerName := client.Name
+            client.mu.Unlock()
+
+            if !isAttackerOni {
+                room.mu.RUnlock()
+                sendError(client, "あなたは鬼ではありません")
+                continue
+            }
+
 			var targetClient *Client
 
 			// ターゲットのClientを探す
 			for c := range room.Clients {
 				c.mu.Lock()
-				isTarget := c.UserID == msg.TargetID
-				c.mu.Unlock()
+				isTarget := c.UserID == msg.TargetID && c.Role == 0 && !c.IsCaught
+                c.mu.Unlock()
 				if isTarget {
 					targetClient = c
 					break
@@ -644,20 +684,15 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 
 			if targetClient != nil {
 				// 2歩目：ターゲット（逃走者）だけに確認通知を個別送信
-				client.mu.Lock()
-				attackerName := client.Name
-				client.mu.Unlock()
-
 				targetClient.mu.Lock()
 				_ = targetClient.Conn.WriteJSON(OutgoingMessage{
 					Event:        "capture_checking",
-					AttackerName: attackerName, // 申請した人（鬼）の名前
+					AttackerName: attackerName, // ← ここで上で作った変数を使う！
 				})
 				targetClient.mu.Unlock()
 			} else {
-				sendError(client, "捕まえる相手が見つかりません")
+				sendError(client, "対象の逃走者が見つからないか、すでに捕まっています")
 			}
-
 		// --- 3歩目：逃走者からの回答 ---
 		case "capture_response":
 			room := GameHub.GetOrCreateRoom(roomID)
