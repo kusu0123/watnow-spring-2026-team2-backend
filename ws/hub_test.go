@@ -90,6 +90,20 @@ func readMessage(t *testing.T, wsConn *websocket.Conn) OutgoingMessage {
 	return msg
 }
 
+func readUntilEvent(t *testing.T, wsConn *websocket.Conn, event string) OutgoingMessage {
+	t.Helper()
+
+	for i := 0; i < 8; i++ {
+		msg := readMessage(t, wsConn)
+		if msg.Event == event {
+			return msg
+		}
+	}
+
+	t.Fatalf("%s イベントを受信できませんでした", event)
+	return OutgoingMessage{}
+}
+
 func waitFor(t *testing.T, check func() bool) {
 	t.Helper()
 
@@ -118,6 +132,24 @@ func findClient(room *RoomState, userID string) (*Client, bool) {
 	}
 
 	return nil, false
+}
+
+func findResult(results []ResultVal, userID string) (ResultVal, bool) {
+	for _, result := range results {
+		if result.UserID == userID {
+			return result, true
+		}
+	}
+	return ResultVal{}, false
+}
+
+func findLocation(locations []LocationVal, userID string) (LocationVal, bool) {
+	for _, location := range locations {
+		if location.UserID == userID {
+			return location, true
+		}
+	}
+	return LocationVal{}, false
 }
 
 func TestWebSocketFlow(t *testing.T) {
@@ -304,6 +336,202 @@ func TestWebSocketStartFlowWithSettings(t *testing.T) {
 	if player.Role != 1 {
 		t.Fatalf("DBに保存されたroleが不正です: %d", player.Role)
 	}
+}
+
+func TestGracePeriodUsesSecondsAndMoveKeepsWorking(t *testing.T) {
+	roomID := "graceSecondsRoom"
+	db, baseURL, cleanup := newTestServer(t, models.Room{
+		ID:           roomID,
+		Status:       0,
+		TimeLimit:    5,
+		OniCount:     1,
+		SyncInterval: 1,
+		GracePeriod:  1,
+	})
+	defer cleanup()
+
+	wsConn := connectToRoom(t, baseURL, roomID)
+	defer wsConn.Close()
+
+	sendJSON(t, wsConn, `{"action":"join","user_id":"player1","name":"はるき"}`)
+	if msg := readMessage(t, wsConn); msg.Event != "waiting" {
+		t.Fatalf("想定外のイベント: %s", msg.Event)
+	}
+
+	startedAt := time.Now()
+	sendJSON(t, wsConn, `{"action":"start"}`)
+	if msg := readUntilEvent(t, wsConn, "start"); msg.TimeLimit != 5 {
+		t.Fatalf("startのtime_limitが不正です: %d", msg.TimeLimit)
+	}
+
+	sendJSON(t, wsConn, `{"action":"move","lat":34.7,"lng":135.5}`)
+	waitFor(t, func() bool {
+		var player models.Player
+		if err := db.Where("room_id = ? AND user_id = ?", roomID, "player1").First(&player).Error; err != nil {
+			return false
+		}
+		return math.Abs(player.Lat-34.7) < 0.000001 && math.Abs(player.Lng-135.5) < 0.000001
+	})
+
+	readUntilEvent(t, wsConn, "game_active")
+	if time.Since(startedAt) > 2500*time.Millisecond {
+		t.Fatalf("grace_periodが秒単位で動いていません: elapsed=%s", time.Since(startedAt))
+	}
+}
+
+func TestSyncIntervalUsesSeconds(t *testing.T) {
+	roomID := "syncSecondsRoom"
+	_, baseURL, cleanup := newTestServer(t, models.Room{
+		ID:           roomID,
+		Status:       0,
+		TimeLimit:    4,
+		OniCount:     1,
+		SyncInterval: 1,
+		GracePeriod:  0,
+	})
+	defer cleanup()
+
+	wsConn := connectToRoom(t, baseURL, roomID)
+	defer wsConn.Close()
+
+	sendJSON(t, wsConn, `{"action":"join","user_id":"player1","name":"はるき"}`)
+	if msg := readMessage(t, wsConn); msg.Event != "waiting" {
+		t.Fatalf("想定外のイベント: %s", msg.Event)
+	}
+
+	sendJSON(t, wsConn, `{"action":"move","lat":34.7,"lng":135.5}`)
+	sendJSON(t, wsConn, `{"action":"start"}`)
+	readUntilEvent(t, wsConn, "start")
+	readUntilEvent(t, wsConn, "game_active")
+
+	msg := readUntilEvent(t, wsConn, "sync")
+	location, ok := findLocation(msg.Locations, "player1")
+	if !ok {
+		t.Fatalf("syncにplayer1の位置情報が含まれていません: %+v", msg.Locations)
+	}
+	if math.Abs(location.Lat-34.7) > 0.000001 || math.Abs(location.Lng-135.5) > 0.000001 {
+		t.Fatalf("syncの位置情報が不正です: %+v", location)
+	}
+}
+
+func TestTimeLimitEndsGameWithResult(t *testing.T) {
+	roomID := "timeLimitRoom"
+	db, baseURL, cleanup := newTestServer(t, models.Room{
+		ID:           roomID,
+		Status:       0,
+		TimeLimit:    1,
+		OniCount:     1,
+		SyncInterval: 1,
+		GracePeriod:  0,
+	})
+	defer cleanup()
+
+	wsConn := connectToRoom(t, baseURL, roomID)
+	defer wsConn.Close()
+
+	sendJSON(t, wsConn, `{"action":"join","user_id":"player1","name":"はるき"}`)
+	if msg := readMessage(t, wsConn); msg.Event != "waiting" {
+		t.Fatalf("想定外のイベント: %s", msg.Event)
+	}
+
+	sendJSON(t, wsConn, `{"action":"start"}`)
+	readUntilEvent(t, wsConn, "start")
+	readUntilEvent(t, wsConn, "game_active")
+
+	msg := readUntilEvent(t, wsConn, "result")
+	if len(msg.Survivors) != 0 {
+		t.Fatalf("鬼のみの部屋に生存逃走者が含まれています: %+v", msg.Survivors)
+	}
+
+	result, ok := findResult(msg.Results, "player1")
+	if !ok {
+		t.Fatalf("resultにplayer1が含まれていません: %+v", msg.Results)
+	}
+	if result.Name != "はるき" || result.Role != 1 || result.IsCaught {
+		t.Fatalf("player1の結果が不正です: %+v", result)
+	}
+
+	waitFor(t, func() bool {
+		var room models.Room
+		if err := db.First(&room, "id = ?", roomID).Error; err != nil {
+			return false
+		}
+		return room.Status == 2
+	})
+}
+
+func TestAllRunnersCaughtEndsGameWithResult(t *testing.T) {
+	roomID := "allCaughtRoom"
+	db, baseURL, cleanup := newTestServer(t, models.Room{
+		ID:           roomID,
+		Status:       0,
+		TimeLimit:    20,
+		OniCount:     1,
+		SyncInterval: 1,
+		GracePeriod:  0,
+	})
+	defer cleanup()
+
+	wsConn1 := connectToRoom(t, baseURL, roomID)
+	defer wsConn1.Close()
+	wsConn2 := connectToRoom(t, baseURL, roomID)
+	defer wsConn2.Close()
+
+	sendJSON(t, wsConn1, `{"action":"join","user_id":"player1","name":"はるき"}`)
+	if msg := readMessage(t, wsConn1); msg.Event != "waiting" {
+		t.Fatalf("想定外のイベント: %s", msg.Event)
+	}
+
+	sendJSON(t, wsConn2, `{"action":"join","user_id":"player2","name":"みな"}`)
+	if msg := readMessage(t, wsConn1); msg.Event != "waiting" {
+		t.Fatalf("想定外のイベント: %s", msg.Event)
+	}
+	if msg := readMessage(t, wsConn2); msg.Event != "waiting" {
+		t.Fatalf("想定外のイベント: %s", msg.Event)
+	}
+
+	sendJSON(t, wsConn1, `{"action":"start"}`)
+	start1 := readUntilEvent(t, wsConn1, "start")
+	start2 := readUntilEvent(t, wsConn2, "start")
+
+	var runnerConn *websocket.Conn
+	runnerID := ""
+	if start1.Role != nil && *start1.Role == 0 {
+		runnerConn = wsConn1
+		runnerID = "player1"
+	}
+	if start2.Role != nil && *start2.Role == 0 {
+		runnerConn = wsConn2
+		runnerID = "player2"
+	}
+	if runnerConn == nil {
+		t.Fatalf("逃走者が割り当てられていません: role1=%v role2=%v", start1.Role, start2.Role)
+	}
+
+	readUntilEvent(t, runnerConn, "game_active")
+	sendJSON(t, runnerConn, `{"action":"capture_response","approved":true}`)
+	readUntilEvent(t, runnerConn, "captured")
+
+	msg := readUntilEvent(t, runnerConn, "result")
+	if len(msg.Survivors) != 0 {
+		t.Fatalf("全員確保後に生存逃走者が含まれています: %+v", msg.Survivors)
+	}
+
+	result, ok := findResult(msg.Results, runnerID)
+	if !ok {
+		t.Fatalf("resultに逃走者が含まれていません: %+v", msg.Results)
+	}
+	if result.Role != 0 || !result.IsCaught {
+		t.Fatalf("逃走者の結果が不正です: %+v", result)
+	}
+
+	waitFor(t, func() bool {
+		var room models.Room
+		if err := db.First(&room, "id = ?", roomID).Error; err != nil {
+			return false
+		}
+		return room.Status == 2
+	})
 }
 
 func TestMoveAndCaptureSavePlayerState(t *testing.T) {
