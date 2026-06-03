@@ -3,6 +3,7 @@ package ws
 import (
 	"encoding/json"
 	"math"
+	"net"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -104,6 +105,28 @@ func readUntilEvent(t *testing.T, wsConn *websocket.Conn, event string) Outgoing
 	return OutgoingMessage{}
 }
 
+func assertErrorMessage(t *testing.T, wsConn *websocket.Conn, message string) {
+	t.Helper()
+
+	msg := readMessage(t, wsConn)
+	if msg.Event != "error" || msg.Message != message {
+		t.Fatalf("エラー通知が不正です: %+v", msg)
+	}
+}
+
+func assertNoMessage(t *testing.T, wsConn *websocket.Conn) {
+	t.Helper()
+
+	wsConn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	_, _, err := wsConn.ReadMessage()
+	if err == nil {
+		t.Fatal("通知されないはずのクライアントがメッセージを受信しました")
+	}
+	if netErr, ok := err.(net.Error); !ok || !netErr.Timeout() {
+		t.Fatalf("想定外の読み取りエラーです: %v", err)
+	}
+}
+
 func waitFor(t *testing.T, check func() bool) {
 	t.Helper()
 
@@ -177,9 +200,21 @@ func TestWebSocketFlow(t *testing.T) {
 		t.Fatalf("保存されたプレイヤーが不正です: %+v", player)
 	}
 
+	room := GameHub.GetOrCreateRoom(roomID)
+	client, ok := findClient(room, "player1")
+	if !ok {
+		t.Fatal("入室したクライアントがメモリに保存されていません")
+	}
+
+	client.mu.Lock()
+	color := client.Color
+	client.mu.Unlock()
+	if color != "blue" {
+		t.Fatalf("メモリに保存されたカラーが不正です: %s", color)
+	}
+
 	_ = wsConn.Close()
 	waitFor(t, func() bool {
-		room := GameHub.GetOrCreateRoom(roomID)
 		room.mu.RLock()
 		count := len(room.Clients)
 		room.mu.RUnlock()
@@ -394,7 +429,7 @@ func TestSyncIntervalUsesSeconds(t *testing.T) {
 	wsConn := connectToRoom(t, baseURL, roomID)
 	defer wsConn.Close()
 
-	sendJSON(t, wsConn, `{"action":"join","user_id":"player1","name":"はるき"}`)
+	sendJSON(t, wsConn, `{"action":"join","user_id":"player1","name":"はるき","color":"#00AAFF"}`)
 	if msg := readMessage(t, wsConn); msg.Event != "waiting" {
 		t.Fatalf("想定外のイベント: %s", msg.Event)
 	}
@@ -412,6 +447,73 @@ func TestSyncIntervalUsesSeconds(t *testing.T) {
 	if math.Abs(location.Lat-34.7) > 0.000001 || math.Abs(location.Lng-135.5) > 0.000001 {
 		t.Fatalf("syncの位置情報が不正です: %+v", location)
 	}
+	if location.Color != "#00AAFF" {
+		t.Fatalf("syncのカラー情報が不正です: %+v", location)
+	}
+}
+
+func TestInvalidJSONReturnsErrorToSender(t *testing.T) {
+	roomID := "invalidJSONRoom"
+	_, baseURL, cleanup := newTestServer(t, models.Room{
+		ID:        roomID,
+		Status:    0,
+		TimeLimit: 900,
+	})
+	defer cleanup()
+
+	wsConn := connectToRoom(t, baseURL, roomID)
+	defer wsConn.Close()
+
+	sendJSON(t, wsConn, `{"action":"join"`)
+	assertErrorMessage(t, wsConn, "送信データの形式が正しくありません")
+}
+
+func TestUnknownActionReturnsError(t *testing.T) {
+	roomID := "unknownActionRoom"
+	_, baseURL, cleanup := newTestServer(t, models.Room{
+		ID:        roomID,
+		Status:    0,
+		TimeLimit: 900,
+	})
+	defer cleanup()
+
+	wsConn := connectToRoom(t, baseURL, roomID)
+	defer wsConn.Close()
+
+	sendJSON(t, wsConn, `{"action":"dance"}`)
+	assertErrorMessage(t, wsConn, "対応していない操作です")
+}
+
+func TestCaptureRequestMissingTargetReturnsErrorOnlyToSender(t *testing.T) {
+	roomID := "captureErrorRoom"
+	_, baseURL, cleanup := newTestServer(t, models.Room{
+		ID:        roomID,
+		Status:    0,
+		TimeLimit: 900,
+	})
+	defer cleanup()
+
+	wsConn1 := connectToRoom(t, baseURL, roomID)
+	defer wsConn1.Close()
+	wsConn2 := connectToRoom(t, baseURL, roomID)
+	defer wsConn2.Close()
+
+	sendJSON(t, wsConn1, `{"action":"join","user_id":"player1","name":"はるき"}`)
+	if msg := readMessage(t, wsConn1); msg.Event != "waiting" {
+		t.Fatalf("想定外のイベント: %s", msg.Event)
+	}
+
+	sendJSON(t, wsConn2, `{"action":"join","user_id":"player2","name":"みな"}`)
+	if msg := readMessage(t, wsConn1); msg.Event != "waiting" {
+		t.Fatalf("想定外のイベント: %s", msg.Event)
+	}
+	if msg := readMessage(t, wsConn2); msg.Event != "waiting" {
+		t.Fatalf("想定外のイベント: %s", msg.Event)
+	}
+
+	sendJSON(t, wsConn1, `{"action":"capture_request","target_id":"missing"}`)
+	assertErrorMessage(t, wsConn1, "捕まえる相手が見つかりません")
+	assertNoMessage(t, wsConn2)
 }
 
 func TestTimeLimitEndsGameWithResult(t *testing.T) {
