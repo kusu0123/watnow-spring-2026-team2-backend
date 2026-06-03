@@ -2,9 +2,11 @@ package ws
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"sync"
 	"time" // 追加（Goroutineのタイマー処理で使います）
+
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/watnow/watnow-spring-2026-team2-backend/models"
@@ -26,18 +28,19 @@ type Client struct {
 	IsCaught bool
 	Lat      float64
 	Lng      float64
+	Color    string
 	mu       sync.Mutex
 }
 
 type RoomState struct {
-	Status    int
-	TimeLimit int
-	OniCount       int  // 追加
-	SyncInterval   int  // 追加
-	GracePeriod    int  // 追加
+	Status         int
+	TimeLimit      int
+	OniCount       int // 追加
+	SyncInterval   int // 追加
+	GracePeriod    int // 追加
 	Clients        map[*Client]bool
 	IsGMLoopActive bool // 追加：GMの重複起動防止
-	mu        sync.RWMutex
+	mu             sync.RWMutex
 }
 
 type Hub struct {
@@ -57,17 +60,18 @@ type IncomingMessage struct {
 	Approved bool    `json:"approved,omitempty"` // 追加：逃走者からの「はい(true)/いいえ(false)」
 	Lat      float64 `json:"lat,omitempty"`
 	Lng      float64 `json:"lng,omitempty"`
+	Color    string  `json:"color,omitempty"`
 }
 
 type OutgoingMessage struct {
-	Event     string        `json:"event"`
-	Players   []string      `json:"players,omitempty"`
-	Role      *int          `json:"role,omitempty"`
-	TimeLimit int           `json:"time_limit,omitempty"`
-	TargetID  string        `json:"target_id,omitempty"`
+	Event        string        `json:"event"`
+	Players      []string      `json:"players,omitempty"`
+	Role         *int          `json:"role,omitempty"`
+	TimeLimit    int           `json:"time_limit,omitempty"`
+	TargetID     string        `json:"target_id,omitempty"`
 	AttackerName string        `json:"attacker_name,omitempty"` // 追加：誰に捕まえられそうか
 	Approved     bool          `json:"approved,omitempty"`      // 追加：最終的な判定結果
-	Locations []LocationVal `json:"locations,omitempty"`
+	Locations    []LocationVal `json:"locations,omitempty"`
 }
 
 type LocationVal struct {
@@ -75,6 +79,10 @@ type LocationVal struct {
 	Lat      float64 `json:"lat"`
 	Lng      float64 `json:"lng"`
 	IsCaught bool    `json:"is_caught"`
+}
+
+func makePlayerID(roomID, userID string) string {
+	return roomID + ":" + userID
 }
 
 func (h *Hub) UpdateRoomSettings(roomID string, timeLimit, oniCount, syncInterval, gracePeriod int) {
@@ -105,7 +113,28 @@ func (h *Hub) GetOrCreateRoom(roomID string) *RoomState {
 
 func (h *Hub) Register(roomID string, client *Client) {
 	room := h.GetOrCreateRoom(roomID)
+
+	client.mu.Lock()
+	userID := client.UserID
+	client.mu.Unlock()
+
 	room.mu.Lock()
+	for oldClient := range room.Clients {
+		if oldClient == client {
+			continue
+		}
+
+		oldClient.mu.Lock()
+		sameUser := userID != "" && oldClient.UserID == userID
+		oldClient.mu.Unlock()
+
+		if sameUser {
+			delete(room.Clients, oldClient)
+			oldClient.mu.Lock()
+			_ = oldClient.Conn.Close()
+			oldClient.mu.Unlock()
+		}
+	}
 	room.Clients[client] = true
 	room.mu.Unlock()
 }
@@ -145,7 +174,7 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 	// Check if room exists in database
 	var room models.Room
 	if err := db.First(&room, "id = ?", roomID).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			http.Error(c.Writer, "Room not found", http.StatusNotFound)
 			return
 		}
@@ -163,7 +192,6 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 		RoomID: roomID,
 	}
 
-	GameHub.Register(roomID, client)
 	defer GameHub.Unregister(roomID, client)
 
 	for {
@@ -187,9 +215,53 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 
 		switch msg.Action {
 		case "join":
+			if msg.UserID == "" {
+				continue
+			}
+
+			var player models.Player
+			err := db.Where("room_id = ? AND user_id = ?", roomID, msg.UserID).First(&player).Error
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				player = models.Player{
+					ID:     makePlayerID(roomID, msg.UserID),
+					RoomID: roomID,
+					UserID: msg.UserID,
+					Name:   msg.Name,
+					Color:  msg.Color,
+				}
+				if err := db.Create(&player).Error; err != nil {
+					continue
+				}
+			} else if err != nil {
+				continue
+			} else {
+				updates := map[string]interface{}{}
+				if msg.Name != "" && msg.Name != player.Name {
+					player.Name = msg.Name
+					updates["name"] = msg.Name
+				}
+				if msg.Color != "" && msg.Color != player.Color {
+					player.Color = msg.Color
+					updates["color"] = msg.Color
+				}
+				if len(updates) > 0 {
+					if err := db.Model(&models.Player{}).Where("room_id = ? AND user_id = ?", roomID, msg.UserID).Updates(updates).Error; err != nil {
+						continue
+					}
+				}
+			}
+
 			client.mu.Lock()
-			client.Name = msg.Name
+			client.UserID = player.UserID
+			client.Name = player.Name
+			client.Role = player.Role
+			client.IsCaught = player.IsCaught
+			client.Lat = player.Lat
+			client.Lng = player.Lng
+			client.Color = player.Color
 			client.mu.Unlock()
+
+			GameHub.Register(roomID, client)
 
 			room.mu.RLock()
 			var names []string
@@ -230,6 +302,12 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				}
 			}
 
+			type roleSave struct {
+				UserID string
+				Role   int
+			}
+
+			var roleSaves []roleSave
 			oniAssigned := 0
 			for c := range room.Clients {
 				c.mu.Lock()
@@ -239,9 +317,21 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				} else {
 					c.Role = 0 // 逃走者
 				}
+				if c.UserID != "" {
+					roleSaves = append(roleSaves, roleSave{
+						UserID: c.UserID,
+						Role:   c.Role,
+					})
+				}
 				c.mu.Unlock()
 			}
 			room.mu.Unlock()
+
+			for _, roleSave := range roleSaves {
+				if err := db.Model(&models.Player{}).Where("room_id = ? AND user_id = ?", roomID, roleSave.UserID).Update("role", roleSave.Role).Error; err != nil {
+					continue
+				}
+			}
 
 			// 開始通知（フロントエンド側はこの通知で猶予時間のカウントダウンUIを出す）
 			room.mu.RLock()
@@ -320,7 +410,14 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 			client.mu.Lock()
 			client.Lat = msg.Lat
 			client.Lng = msg.Lng
+			userID := client.UserID
 			client.mu.Unlock()
+			if userID != "" {
+				_ = db.Model(&models.Player{}).Where("room_id = ? AND user_id = ?", roomID, userID).Updates(map[string]interface{}{
+					"lat": msg.Lat,
+					"lng": msg.Lng,
+				}).Error
+			}
 			// ※ Broadcast（一斉送信）は削除し、メモリの更新のみを行う
 
 		// --- 1歩目：鬼からの確保申請 ---
@@ -328,10 +425,13 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 			room := GameHub.GetOrCreateRoom(roomID)
 			room.mu.RLock()
 			var targetClient *Client
-		
+
 			// ターゲットのClientを探す
 			for c := range room.Clients {
-				if c.UserID == msg.TargetID {
+				c.mu.Lock()
+				isTarget := c.UserID == msg.TargetID
+				c.mu.Unlock()
+				if isTarget {
 					targetClient = c
 					break
 				}
@@ -340,10 +440,14 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 
 			if targetClient != nil {
 				// 2歩目：ターゲット（逃走者）だけに確認通知を個別送信
+				client.mu.Lock()
+				attackerName := client.Name
+				client.mu.Unlock()
+
 				targetClient.mu.Lock()
 				_ = targetClient.Conn.WriteJSON(OutgoingMessage{
-				Event:        "capture_checking",
-				AttackerName: client.Name, // 申請した人（鬼）の名前
+					Event:        "capture_checking",
+					AttackerName: attackerName, // 申請した人（鬼）の名前
 				})
 				targetClient.mu.Unlock()
 			}
@@ -351,30 +455,32 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 		// --- 3歩目：逃走者からの回答 ---
 		case "capture_response":
 			room := GameHub.GetOrCreateRoom(roomID)
-		
+
 			if msg.Approved {
 				// 4歩目（承認時）：ステータスを確定させて全員に通知
-				room.mu.Lock()
-				for c := range room.Clients {
-					c.mu.Lock()
-					// 回答した本人（ターゲット）のステータスを更新
-					if c.UserID == client.UserID {
-					c.IsCaught = true
-				}
-				c.mu.Unlock()
-			}
-			room.mu.Unlock()
+				client.mu.Lock()
+				client.IsCaught = true
+				targetID := client.UserID
+				client.mu.Unlock()
 
-			room.Broadcast(OutgoingMessage{
-				Event:    "captured",
-				TargetID: client.UserID,
-				Approved: true,
-			})
+				if targetID != "" {
+					_ = db.Model(&models.Player{}).Where("room_id = ? AND user_id = ?", roomID, targetID).Update("is_caught", true).Error
+				}
+
+				room.Broadcast(OutgoingMessage{
+					Event:    "captured",
+					TargetID: targetID,
+					Approved: true,
+				})
 			} else {
 				// 4歩目（拒否時）：不成立だったことを全員（または鬼）に通知
+				client.mu.Lock()
+				targetID := client.UserID
+				client.mu.Unlock()
+
 				room.Broadcast(OutgoingMessage{
-				Event:    "capture_denied",
-				TargetID: client.UserID,
+					Event:    "capture_denied",
+					TargetID: targetID,
 				})
 			}
 		}
