@@ -175,6 +175,14 @@ func findLocation(locations []LocationVal, userID string) (LocationVal, bool) {
 	return LocationVal{}, false
 }
 
+func roomExists(roomID string) bool {
+	GameHub.mu.RLock()
+	defer GameHub.mu.RUnlock()
+
+	_, ok := GameHub.Rooms[roomID]
+	return ok
+}
+
 func TestWebSocketFlow(t *testing.T) {
 	roomID := "testRoom"
 	db, baseURL, cleanup := newTestServer(t, models.Room{
@@ -215,10 +223,7 @@ func TestWebSocketFlow(t *testing.T) {
 
 	_ = wsConn.Close()
 	waitFor(t, func() bool {
-		room.mu.RLock()
-		count := len(room.Clients)
-		room.mu.RUnlock()
-		return count == 0
+		return !roomExists(roomID)
 	})
 
 	var count int64
@@ -371,6 +376,60 @@ func TestWebSocketStartFlowWithSettings(t *testing.T) {
 	if player.Role != 1 {
 		t.Fatalf("DBに保存されたroleが不正です: %d", player.Role)
 	}
+
+	var startedRoom models.Room
+	if err := db.First(&startedRoom, "id = ?", roomID).Error; err != nil {
+		t.Fatalf("ルーム取得失敗: %v", err)
+	}
+	if startedRoom.Status != 1 {
+		t.Fatalf("DBに保存されたルームstatusが不正です: %d", startedRoom.Status)
+	}
+}
+
+func TestActiveRoomIsFinishedAndRemovedWhenEmpty(t *testing.T) {
+	roomID := "activeCleanupRoom"
+	db, baseURL, cleanup := newTestServer(t, models.Room{
+		ID:           roomID,
+		Status:       0,
+		TimeLimit:    900,
+		OniCount:     1,
+		SyncInterval: 1,
+		GracePeriod:  0,
+	})
+	defer cleanup()
+
+	wsConn := connectToRoom(t, baseURL, roomID)
+
+	sendJSON(t, wsConn, `{"action":"join","user_id":"player1","name":"はるき"}`)
+	if msg := readMessage(t, wsConn); msg.Event != "waiting" {
+		t.Fatalf("想定外のイベント: %s", msg.Event)
+	}
+
+	sendJSON(t, wsConn, `{"action":"start"}`)
+	if msg := readUntilEvent(t, wsConn, "start"); msg.TimeLimit != 900 {
+		t.Fatalf("startのtime_limitが不正です: %d", msg.TimeLimit)
+	}
+
+	waitFor(t, func() bool {
+		var room models.Room
+		if err := db.First(&room, "id = ?", roomID).Error; err != nil {
+			return false
+		}
+		return room.Status == 1
+	})
+
+	_ = wsConn.Close()
+	waitFor(t, func() bool {
+		return !roomExists(roomID)
+	})
+
+	waitFor(t, func() bool {
+		var room models.Room
+		if err := db.First(&room, "id = ?", roomID).Error; err != nil {
+			return false
+		}
+		return room.Status == 2
+	})
 }
 
 func TestGracePeriodUsesSecondsAndMoveKeepsWorking(t *testing.T) {
@@ -502,7 +561,7 @@ func TestCaptureRequestMissingTargetReturnsErrorOnlyToSender(t *testing.T) {
 	if msg := readMessage(t, wsConn1); msg.Event != "waiting" {
 		t.Fatalf("想定外のイベント: %s", msg.Event)
 	}
-	
+
 	// player1を「鬼」に強制設定する（DBとメモリ両方）
 	db.Model(&models.Player{}).Where("room_id = ? AND user_id = ?", roomID, "player1").Update("role", 1)
 	room := GameHub.GetOrCreateRoom(roomID)

@@ -9,6 +9,8 @@ import (
 	"gorm.io/gorm"
 )
 
+const writeWait = 10 * time.Second
+
 func cleanGameSettings(timeLimit, syncInterval, gracePeriod int) (int, int, int) {
 	if timeLimit < 0 {
 		timeLimit = 0
@@ -34,7 +36,9 @@ func (room *RoomState) Broadcast(msg interface{}) {
 	// 2. コピーしたリストに対して、順番に送信していく
 	for _, client := range clients {
 		client.mu.Lock()
+		_ = client.Conn.SetWriteDeadline(time.Now().Add(writeWait))
 		err := client.Conn.WriteJSON(msg)
+		_ = client.Conn.SetWriteDeadline(time.Time{})
 		client.mu.Unlock()
 
 		// 送信に失敗した場合（すでに通信が切れている等）はログだけ残す
