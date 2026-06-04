@@ -5,7 +5,6 @@ import (
 	"errors"
 	"log"
 	"net/http"
-	"sort"
 	"sync"
 	"time"
 
@@ -57,68 +56,15 @@ var GameHub = &Hub{
 	Rooms: make(map[string]*RoomState),
 }
 
-type IncomingMessage struct {
-	Action   string  `json:"action"`
-	UserID   string  `json:"user_id,omitempty"`
-	Name     string  `json:"name,omitempty"`
-	TargetID string  `json:"target_id,omitempty"`
-	Approved bool    `json:"approved,omitempty"` // 追加：逃走者からの「はい(true)/いいえ(false)」
-	Lat      float64 `json:"lat,omitempty"`
-	Lng      float64 `json:"lng,omitempty"`
-	Color    string  `json:"color,omitempty"`
-}
-
-type OutgoingMessage struct {
-	Event        string        `json:"event"`
-	Message      string        `json:"message,omitempty"`
-	Players      []string      `json:"players,omitempty"`
-	Role         *int          `json:"role,omitempty"`
-	TimeLimit    int           `json:"time_limit,omitempty"`
-	TargetID     string        `json:"target_id,omitempty"`
-	AttackerName string        `json:"attacker_name,omitempty"` // 追加：誰に捕まえられそうか
-	Approved     bool          `json:"approved,omitempty"`      // 追加：最終的な判定結果
-	Locations    []LocationVal `json:"locations,omitempty"`
-	Survivors    []string      `json:"survivors,omitempty"`
-	Results      []ResultVal   `json:"results,omitempty"`
-}
-
-type LocationVal struct {
-	UserID   string  `json:"user_id"`
-	Lat      float64 `json:"lat"`
-	Lng      float64 `json:"lng"`
-	IsCaught bool    `json:"is_caught"`
-	Color    string  `json:"color"`
-}
-
-type ResultVal struct {
-	UserID   string `json:"user_id"`
-	Name     string `json:"name"`
-	Role     int    `json:"role"`
-	IsCaught bool   `json:"is_caught"`
-}
-
 func makePlayerID(roomID, userID string) string {
 	return roomID + ":" + userID
-}
-
-func cleanGameSettings(timeLimit, syncInterval, gracePeriod int) (int, int, int) {
-	if timeLimit < 0 {
-		timeLimit = 0
-	}
-	if syncInterval <= 0 {
-		syncInterval = 1
-	}
-	if gracePeriod < 0 {
-		gracePeriod = 0
-	}
-	return timeLimit, syncInterval, gracePeriod
 }
 
 func sendError(client *Client, message string) {
 	// ▼ サーバー側（ターミナル）にログを出力
 	client.mu.Lock()
 	log.Printf("[Error] Room: %s | User: %s | Message: %s\n", client.RoomID, client.UserID, message)
-	
+
 	// ユーザー（スマホやPC）にエラーメッセージを送信
 	_ = client.Conn.WriteJSON(OutgoingMessage{
 		Event:   "error",
@@ -183,7 +129,7 @@ func (h *Hub) Register(roomID string, client *Client) {
 	room.mu.Unlock()
 }
 
-func (h *Hub) Unregister(roomID string, client *Client) {
+func (h *Hub) Unregister(roomID string, client *Client, db *gorm.DB) {
 	h.mu.Lock()
 	room, ok := h.Rooms[roomID]
 	h.mu.Unlock()
@@ -199,205 +145,38 @@ func (h *Hub) Unregister(roomID string, client *Client) {
 		_ = client.Conn.Close()
 		client.mu.Unlock()
 	}
-	room.mu.Unlock()
-}
-
-func (room *RoomState) Broadcast(msg interface{}) {
-	room.mu.RLock()
-	defer room.mu.RUnlock()
-	for client := range room.Clients {
-		client.mu.Lock()
-		_ = client.Conn.WriteJSON(msg)
-		client.mu.Unlock()
-	}
-}
-
-func (room *RoomState) clientList() []*Client {
-	room.mu.RLock()
-	defer room.mu.RUnlock()
-
-	clients := make([]*Client, 0, len(room.Clients))
-	for client := range room.Clients {
-		clients = append(clients, client)
-	}
-	return clients
-}
-
-func (room *RoomState) locations() []LocationVal {
-	clients := room.clientList()
-	locations := make([]LocationVal, 0, len(clients))
-
-	for _, client := range clients {
-		client.mu.Lock()
-		locations = append(locations, LocationVal{
-			UserID:   client.UserID,
-			Lat:      client.Lat,
-			Lng:      client.Lng,
-			IsCaught: client.IsCaught,
-			Color:    client.Color,
-		})
-		client.mu.Unlock()
-	}
-
-	sort.Slice(locations, func(i, j int) bool {
-		return locations[i].UserID < locations[j].UserID
-	})
-
-	return locations
-}
-
-func (room *RoomState) resultMessage() OutgoingMessage {
-	clients := room.clientList()
-	results := make([]ResultVal, 0, len(clients))
-	var survivors []string
-
-	for _, client := range clients {
-		client.mu.Lock()
-		result := ResultVal{
-			UserID:   client.UserID,
-			Name:     client.Name,
-			Role:     client.Role,
-			IsCaught: client.IsCaught,
-		}
-		client.mu.Unlock()
-
-		if result.Role == 0 && !result.IsCaught {
-			survivors = append(survivors, result.Name)
-		}
-		results = append(results, result)
-	}
-
-	sort.Strings(survivors)
-	sort.Slice(results, func(i, j int) bool {
-		return results[i].UserID < results[j].UserID
-	})
-
-	return OutgoingMessage{
-		Event:     "result",
-		Survivors: survivors,
-		Results:   results,
-	}
-}
-
-func (room *RoomState) shouldEnd(now time.Time) bool {
-	room.mu.RLock()
-	if room.Status != 1 || !room.IsGameActive {
-		room.mu.RUnlock()
-		return false
-	}
-
-	if room.TimeLimit <= 0 || !now.Before(room.ActiveAt.Add(time.Duration(room.TimeLimit)*time.Second)) {
-		room.mu.RUnlock()
-		return true
-	}
-
-	clients := make([]*Client, 0, len(room.Clients))
-	for client := range room.Clients {
-		clients = append(clients, client)
-	}
-	room.mu.RUnlock()
-
-	hasRunner := false
-	allCaught := true
-	for _, client := range clients {
-		client.mu.Lock()
-		role := client.Role
-		isCaught := client.IsCaught
-		client.mu.Unlock()
-
-		if role == 0 {
-			hasRunner = true
-			if !isCaught {
-				allCaught = false
-			}
-		}
-	}
-
-	return hasRunner && allCaught
-}
-
-func (room *RoomState) finish(roomID string, db *gorm.DB) bool {
-	room.mu.Lock()
-	if room.Status != 1 {
-		room.mu.Unlock()
-		return false
-	}
-	room.Status = 2
+	//部屋に誰もいなくなったかチェック
+	isEmpty := len(room.Clients) == 0
 	room.mu.Unlock()
 
-	_ = db.Model(&models.Room{}).Where("id = ?", roomID).Update("status", 2).Error
-	room.Broadcast(room.resultMessage())
-	return true
-}
-
-func runGameLoop(roomID string, room *RoomState, db *gorm.DB) {
-	defer func() {
-		room.mu.Lock()
-		room.IsGMLoopActive = false
-		room.mu.Unlock()
-	}()
-
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
-
-	var nextSyncAt time.Time
-
-	for {
-		now := time.Now()
-
-		room.mu.RLock()
-		status := room.Status
-		hasClients := len(room.Clients) > 0
-		isGameActive := room.IsGameActive
-		startAt := room.StartAt
-		syncInterval := room.SyncInterval
-		activeAt := room.ActiveAt
-		room.mu.RUnlock()
-
-		if status != 1 || !hasClients {
-			return
-		}
-
-		if !isGameActive && !now.Before(startAt) {
-			room.mu.Lock()
-			if room.Status != 1 || len(room.Clients) == 0 {
-				room.mu.Unlock()
-				return
+	//誰もいなければ、Hub(メモリ)から部屋ごと削除する
+	if isEmpty {
+		h.mu.Lock()
+		// ロックを取ってからもう一度確認（処理中に別の人とすれ違いで入室してきたら消さないようにする安全対策）
+		if r, exists := h.Rooms[roomID]; exists {
+			r.mu.Lock()
+			stillEmpty := len(r.Clients) == 0
+			shouldFinishRoom := stillEmpty && r.Status == 1
+			if shouldFinishRoom {
+				r.Status = 2
+				r.IsGameActive = false
+				r.IsGMLoopActive = false
 			}
-			if !room.IsGameActive {
-				room.IsGameActive = true
-				room.ActiveAt = now
-				activeAt = now
-				isGameActive = true
-			}
-			syncInterval = room.SyncInterval
-			room.mu.Unlock()
+			r.mu.Unlock()
 
-			nextSyncAt = activeAt.Add(time.Duration(syncInterval) * time.Second)
-			room.Broadcast(OutgoingMessage{Event: "game_active"})
-		}
-
-		if isGameActive {
-			if room.shouldEnd(now) {
-				room.finish(roomID, db)
-				return
-			}
-
-			if nextSyncAt.IsZero() {
-				nextSyncAt = activeAt.Add(time.Duration(syncInterval) * time.Second)
-			}
-			if !now.Before(nextSyncAt) {
-				room.Broadcast(OutgoingMessage{
-					Event:     "sync",
-					Locations: room.locations(),
-				})
-				for !now.Before(nextSyncAt) {
-					nextSyncAt = nextSyncAt.Add(time.Duration(syncInterval) * time.Second)
+			if stillEmpty {
+				if shouldFinishRoom && db != nil {
+					if err := db.Model(&models.Room{}).Where("id = ?", roomID).Update("status", 2).Error; err != nil {
+						log.Printf("[Error] Room: %s | 空部屋の終了状態保存に失敗しました: %v\n", roomID, err)
+						h.mu.Unlock()
+						return
+					}
 				}
+				delete(h.Rooms, roomID)
+				log.Printf("[Info] Room: %s | メモリから削除されました（退出完了）\n", roomID)
 			}
 		}
-
-		<-ticker.C
+		h.mu.Unlock()
 	}
 }
 
@@ -437,7 +216,40 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 		RoomID: roomID,
 	}
 
-	defer GameHub.Unregister(roomID, client)
+	defer GameHub.Unregister(roomID, client, db)
+
+	done := make(chan struct{})
+	defer close(done)
+
+	pongWait := 60 * time.Second
+	pingPeriod := (pongWait * 9) / 10
+
+	// クライアントからPongが返ってきたら、タイムアウト時間を延長する
+	conn.SetReadDeadline(time.Now().Add(pongWait))
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(pongWait))
+		return nil
+	})
+
+	go func() {
+		ticker := time.NewTicker(pingPeriod)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				client.mu.Lock()
+				_ = client.Conn.SetWriteDeadline(time.Now().Add(writeWait))
+				err := client.Conn.WriteMessage(websocket.PingMessage, nil)
+				_ = client.Conn.SetWriteDeadline(time.Time{})
+				client.mu.Unlock()
+				if err != nil {
+					return // 送信失敗＝切断されているので終了
+				}
+			}
+		}
+	}()
 
 	for {
 		_, messageData, err := conn.ReadMessage()
@@ -470,7 +282,7 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				sendError(client, "名前は1文字以上、20文字以下にしてください")
 				continue
 			}
-			
+
 			// カラーコード（例: #FF0000）の簡易チェック：7文字で「#」から始まるか
 			if msg.Color != "" && (len(msg.Color) != 7 || msg.Color[0] != '#') {
 				sendError(client, "カラーの形式が不正です（例: #FF0000）")
@@ -593,6 +405,20 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 			}
 			room.mu.Unlock()
 
+			if err := db.Model(&models.Room{}).Where("id = ?", roomID).Update("status", 1).Error; err != nil {
+				room.mu.Lock()
+				if room.Status == 1 {
+					room.Status = 0
+					room.IsGMLoopActive = false
+					room.IsGameActive = false
+					room.StartAt = time.Time{}
+					room.ActiveAt = time.Time{}
+				}
+				room.mu.Unlock()
+				sendError(client, "ゲーム開始状態の保存に失敗しました")
+				continue
+			}
+
 			for _, roleSave := range roleSaves {
 				if err := db.Model(&models.Player{}).Where("room_id = ? AND user_id = ?", roomID, roleSave.UserID).Update("role", roleSave.Role).Error; err != nil {
 					continue
@@ -652,21 +478,21 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 			room.mu.RLock()
 
 			if room.Status != 1 {
-                room.mu.RUnlock()
-                sendError(client, "ゲーム中ではありません")
-                continue
-            }
+				room.mu.RUnlock()
+				sendError(client, "ゲーム中ではありません")
+				continue
+			}
 
-            client.mu.Lock()
-            isAttackerOni := client.Role == 1
-            attackerName := client.Name
-            client.mu.Unlock()
+			client.mu.Lock()
+			isAttackerOni := client.Role == 1
+			attackerName := client.Name
+			client.mu.Unlock()
 
-            if !isAttackerOni {
-                room.mu.RUnlock()
-                sendError(client, "あなたは鬼ではありません")
-                continue
-            }
+			if !isAttackerOni {
+				room.mu.RUnlock()
+				sendError(client, "あなたは鬼ではありません")
+				continue
+			}
 
 			var targetClient *Client
 
@@ -674,7 +500,7 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 			for c := range room.Clients {
 				c.mu.Lock()
 				isTarget := c.UserID == msg.TargetID && c.Role == 0 && !c.IsCaught
-                c.mu.Unlock()
+				c.mu.Unlock()
 				if isTarget {
 					targetClient = c
 					break
