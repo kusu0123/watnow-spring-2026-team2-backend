@@ -353,13 +353,13 @@ func TestWebSocketStartFlowWithSettings(t *testing.T) {
 		t.Fatalf("想定外のイベント: %s", msg.Event)
 	}
 
-	GameHub.UpdateRoomSettings(roomID, 120, 1, 1, 0)
+	GameHub.UpdateRoomSettings(roomID, 120, 1, "school-yard", 1, 0)
 
 	room := GameHub.GetOrCreateRoom(roomID)
 	room.mu.RLock()
-	if room.SyncInterval != 1 || room.GracePeriod != 0 {
+	if room.AreaSize != "school-yard" || room.SyncInterval != 1 || room.GracePeriod != 0 {
 		room.mu.RUnlock()
-		t.Fatalf("設定反映失敗: sync_interval=%d grace_period=%d", room.SyncInterval, room.GracePeriod)
+		t.Fatalf("設定反映失敗: area_size=%s sync_interval=%d grace_period=%d", room.AreaSize, room.SyncInterval, room.GracePeriod)
 	}
 	room.mu.RUnlock()
 

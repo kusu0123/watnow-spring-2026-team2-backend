@@ -37,6 +37,7 @@ type RoomState struct {
 	Status         int
 	TimeLimit      int
 	OniCount       int // 追加
+	AreaSize       string
 	SyncInterval   int // 追加
 	GracePeriod    int // 追加
 	StartAt        time.Time
@@ -73,7 +74,7 @@ func sendError(client *Client, message string) {
 	client.mu.Unlock()
 }
 
-func (h *Hub) UpdateRoomSettings(roomID string, timeLimit, oniCount, syncInterval, gracePeriod int) {
+func (h *Hub) UpdateRoomSettings(roomID string, timeLimit, oniCount int, areaSize string, syncInterval, gracePeriod int) {
 	timeLimit, syncInterval, gracePeriod = cleanGameSettings(timeLimit, syncInterval, gracePeriod)
 
 	room := h.GetOrCreateRoom(roomID)
@@ -81,6 +82,7 @@ func (h *Hub) UpdateRoomSettings(roomID string, timeLimit, oniCount, syncInterva
 	defer room.mu.Unlock()
 	room.TimeLimit = timeLimit
 	room.OniCount = oniCount
+	room.AreaSize = areaSize
 	room.SyncInterval = syncInterval
 	room.GracePeriod = gracePeriod
 }
@@ -206,6 +208,7 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 		roomState.Status = room.Status
 		roomState.TimeLimit = timeLimit
 		roomState.OniCount = room.OniCount
+		roomState.AreaSize = room.AreaSize
 		roomState.SyncInterval = syncInterval
 		roomState.GracePeriod = gracePeriod
 	}

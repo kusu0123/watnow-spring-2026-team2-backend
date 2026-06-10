@@ -20,16 +20,16 @@ func main() {
 	if err != nil {
 		panic("データベースの取得に失敗しました")
 	}
-	
+
 	// SQLiteは同時書き込みに弱いため、最大接続数を1にしてロックエラーを防ぐ
 	sqlDB.SetMaxOpenConns(1)
-	
+
 	// サーバー終了時に、確実にデータベースの接続を閉じて後片付けする
 	defer sqlDB.Close()
 
 	if err := db.AutoMigrate(&models.Room{}, &models.Player{}); err != nil {
-        panic("DBマイグレーション失敗: " + err.Error())
-    }
+		panic("DBマイグレーション失敗: " + err.Error())
+	}
 	r := gin.Default()
 
 	r.GET("/ws/rooms/:id", func(c *gin.Context) {
@@ -89,7 +89,7 @@ func main() {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "エリアの文字数が長すぎます"})
 			return
 		}
-		
+
 		// DBの更新（0値も更新したいので map で Updates する）
 		tx := db.Model(&models.Room{}).Where("id = ?", roomID).Updates(map[string]interface{}{
 			"time_limit":    input.TimeLimit,
@@ -108,7 +108,7 @@ func main() {
 		}
 
 		// WebSocket側のメモリ(GameHub)に最新の設定を同期させる
-		ws.GameHub.UpdateRoomSettings(roomID, input.TimeLimit, input.OniCount, input.SyncInterval, input.GracePeriod)
+		ws.GameHub.UpdateRoomSettings(roomID, input.TimeLimit, input.OniCount, input.AreaSize, input.SyncInterval, input.GracePeriod)
 
 		c.JSON(http.StatusOK, gin.H{
 			"status":  "success",
