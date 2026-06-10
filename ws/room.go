@@ -108,20 +108,22 @@ func (room *RoomState) locations() []LocationVal {
 	return locations
 }
 
-func (room *RoomState) resultMessage() OutgoingMessage {
-	clients := room.clientList()
-	results := make([]ResultVal, 0, len(clients))
+func (room *RoomState) resultMessage(roomID string, db *gorm.DB) (OutgoingMessage, error) {
+	var players []models.Player
+	if err := db.Where("room_id = ?", roomID).Order("user_id ASC").Find(&players).Error; err != nil {
+		return OutgoingMessage{}, err
+	}
+
+	results := make([]ResultVal, 0, len(players))
 	var survivors []string
 
-	for _, client := range clients {
-		client.mu.Lock()
+	for _, player := range players {
 		result := ResultVal{
-			UserID:   client.UserID,
-			Name:     client.Name,
-			Role:     client.Role,
-			IsCaught: client.IsCaught,
+			UserID:   player.UserID,
+			Name:     player.Name,
+			Role:     player.Role,
+			IsCaught: player.IsCaught,
 		}
-		client.mu.Unlock()
 
 		if result.Role == 0 && !result.IsCaught {
 			survivors = append(survivors, result.Name)
@@ -130,15 +132,12 @@ func (room *RoomState) resultMessage() OutgoingMessage {
 	}
 
 	sort.Strings(survivors)
-	sort.Slice(results, func(i, j int) bool {
-		return results[i].UserID < results[j].UserID
-	})
 
 	return OutgoingMessage{
 		Event:     "result",
 		Survivors: survivors,
 		Results:   results,
-	}
+	}, nil
 }
 
 func (room *RoomState) shouldEnd(now time.Time) bool {
@@ -179,6 +178,12 @@ func (room *RoomState) shouldEnd(now time.Time) bool {
 }
 
 func (room *RoomState) finish(roomID string, db *gorm.DB) bool {
+	resultMessage, err := room.resultMessage(roomID, db)
+	if err != nil {
+		log.Printf("[Error] Room: %s | リザルト集計に失敗しました: %v\n", roomID, err)
+		return false
+	}
+
 	room.mu.Lock()
 	if room.Status != 1 {
 		room.mu.Unlock()
@@ -188,7 +193,7 @@ func (room *RoomState) finish(roomID string, db *gorm.DB) bool {
 	room.mu.Unlock()
 
 	_ = db.Model(&models.Room{}).Where("id = ?", roomID).Update("status", 2).Error
-	room.Broadcast(room.resultMessage())
+	room.Broadcast(resultMessage)
 	return true
 }
 
