@@ -325,7 +325,7 @@ func TestWebSocketStartFlowWithSettings(t *testing.T) {
 	wsConn := connectToRoom(t, baseURL, roomID)
 	defer wsConn.Close()
 
-	sendJSON(t, wsConn, `{"action":"join","user_id":"player1","name":"はるき"}`)
+	sendJSON(t, wsConn, `{"action":"join","user_id":"player1","name":"はるき","color":"#00AAFF"}`)
 	if msg := readMessage(t, wsConn); msg.Event != "waiting" {
 		t.Fatalf("想定外のイベント: %s", msg.Event)
 	}
@@ -340,7 +340,7 @@ func TestWebSocketStartFlowWithSettings(t *testing.T) {
 	}
 	room.mu.RUnlock()
 
-	sendJSON(t, wsConn, `{"action":"start"}`)
+	sendJSON(t, wsConn, `{"action":"start","oni_users":["player1"]}`)
 
 	gotStart := false
 	gotGameActive := false
@@ -373,8 +373,18 @@ func TestWebSocketStartFlowWithSettings(t *testing.T) {
 	if err := db.Where("room_id = ? AND user_id = ?", roomID, "player1").First(&player).Error; err != nil {
 		t.Fatalf("プレイヤー取得失敗: %v", err)
 	}
-	if player.Role != 1 {
-		t.Fatalf("DBに保存されたroleが不正です: %d", player.Role)
+	if player.Role != 1 || player.Color != "black" {
+		t.Fatalf("DBに保存されたプレイヤー状態が不正です: %+v", player)
+	}
+	client, ok := findClient(room, "player1")
+	if !ok {
+		t.Fatal("開始後のクライアントがメモリに存在しません")
+	}
+	client.mu.Lock()
+	color := client.Color
+	client.mu.Unlock()
+	if color != "black" {
+		t.Fatalf("メモリ上の鬼カラーが不正です: %s", color)
 	}
 
 	var startedRoom models.Room
@@ -383,6 +393,164 @@ func TestWebSocketStartFlowWithSettings(t *testing.T) {
 	}
 	if startedRoom.Status != 1 {
 		t.Fatalf("DBに保存されたルームstatusが不正です: %d", startedRoom.Status)
+	}
+}
+
+func TestStartUsesDesignatedOniAndOverwritesOnlyOniColor(t *testing.T) {
+	roomID := "designatedOniRoom"
+	db, baseURL, cleanup := newTestServer(t, models.Room{
+		ID:           roomID,
+		Status:       0,
+		TimeLimit:    900,
+		OniCount:     1,
+		SyncInterval: 1,
+		GracePeriod:  0,
+	})
+	defer cleanup()
+
+	wsConn1 := connectToRoom(t, baseURL, roomID)
+	defer wsConn1.Close()
+	wsConn2 := connectToRoom(t, baseURL, roomID)
+	defer wsConn2.Close()
+
+	sendJSON(t, wsConn1, `{"action":"join","user_id":"player1","name":"はるき","color":"#00AAFF"}`)
+	if msg := readMessage(t, wsConn1); msg.Event != "waiting" {
+		t.Fatalf("想定外のイベント: %s", msg.Event)
+	}
+
+	sendJSON(t, wsConn2, `{"action":"join","user_id":"player2","name":"みな","color":"#FF00AA"}`)
+	if msg := readMessage(t, wsConn1); msg.Event != "waiting" {
+		t.Fatalf("想定外のイベント: %s", msg.Event)
+	}
+	if msg := readMessage(t, wsConn2); msg.Event != "waiting" {
+		t.Fatalf("想定外のイベント: %s", msg.Event)
+	}
+
+	sendJSON(t, wsConn1, `{"action":"start","oni_users":["player2"]}`)
+	start1 := readUntilEvent(t, wsConn1, "start")
+	start2 := readUntilEvent(t, wsConn2, "start")
+	if start1.Role == nil || *start1.Role != 0 {
+		t.Fatalf("player1は逃走者になる想定です: %+v", start1)
+	}
+	if start2.Role == nil || *start2.Role != 1 {
+		t.Fatalf("player2は鬼になる想定です: %+v", start2)
+	}
+
+	var runner models.Player
+	if err := db.Where("room_id = ? AND user_id = ?", roomID, "player1").First(&runner).Error; err != nil {
+		t.Fatalf("逃走者取得失敗: %v", err)
+	}
+	if runner.Role != 0 || runner.Color != "#00AAFF" {
+		t.Fatalf("逃走者のDB状態が不正です: %+v", runner)
+	}
+
+	var oni models.Player
+	if err := db.Where("room_id = ? AND user_id = ?", roomID, "player2").First(&oni).Error; err != nil {
+		t.Fatalf("鬼取得失敗: %v", err)
+	}
+	if oni.Role != 1 || oni.Color != "black" {
+		t.Fatalf("鬼のDB状態が不正です: %+v", oni)
+	}
+
+	room := GameHub.GetOrCreateRoom(roomID)
+	runnerClient, ok := findClient(room, "player1")
+	if !ok {
+		t.Fatal("逃走者クライアントがメモリに存在しません")
+	}
+	oniClient, ok := findClient(room, "player2")
+	if !ok {
+		t.Fatal("鬼クライアントがメモリに存在しません")
+	}
+
+	runnerClient.mu.Lock()
+	runnerRole := runnerClient.Role
+	runnerColor := runnerClient.Color
+	runnerClient.mu.Unlock()
+	if runnerRole != 0 || runnerColor != "#00AAFF" {
+		t.Fatalf("逃走者のメモリ状態が不正です: role=%d color=%s", runnerRole, runnerColor)
+	}
+
+	oniClient.mu.Lock()
+	oniRole := oniClient.Role
+	oniColor := oniClient.Color
+	oniClient.mu.Unlock()
+	if oniRole != 1 || oniColor != "black" {
+		t.Fatalf("鬼のメモリ状態が不正です: role=%d color=%s", oniRole, oniColor)
+	}
+}
+
+func TestStartRequiresValidOniUsers(t *testing.T) {
+	tests := []struct {
+		name        string
+		startBody   string
+		wantMessage string
+	}{
+		{
+			name:        "missingOniUsers",
+			startBody:   `{"action":"start"}`,
+			wantMessage: "鬼に指定するユーザーを1人以上選択してください",
+		},
+		{
+			name:        "emptyOniUsers",
+			startBody:   `{"action":"start","oni_users":[]}`,
+			wantMessage: "鬼に指定するユーザーを1人以上選択してください",
+		},
+		{
+			name:        "unknownOniUser",
+			startBody:   `{"action":"start","oni_users":["missing"]}`,
+			wantMessage: "鬼に指定されたユーザーが参加していません",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			roomID := "invalidStart" + tt.name
+			db, baseURL, cleanup := newTestServer(t, models.Room{
+				ID:           roomID,
+				Status:       0,
+				TimeLimit:    900,
+				OniCount:     1,
+				SyncInterval: 1,
+				GracePeriod:  0,
+			})
+			defer cleanup()
+
+			wsConn := connectToRoom(t, baseURL, roomID)
+			defer wsConn.Close()
+
+			sendJSON(t, wsConn, `{"action":"join","user_id":"player1","name":"はるき","color":"#00AAFF"}`)
+			if msg := readMessage(t, wsConn); msg.Event != "waiting" {
+				t.Fatalf("想定外のイベント: %s", msg.Event)
+			}
+
+			sendJSON(t, wsConn, tt.startBody)
+			assertErrorMessage(t, wsConn, tt.wantMessage)
+
+			var room models.Room
+			if err := db.First(&room, "id = ?", roomID).Error; err != nil {
+				t.Fatalf("ルーム取得失敗: %v", err)
+			}
+			if room.Status != 0 {
+				t.Fatalf("不正なstartでDBのルームstatusが更新されています: %d", room.Status)
+			}
+
+			var player models.Player
+			if err := db.Where("room_id = ? AND user_id = ?", roomID, "player1").First(&player).Error; err != nil {
+				t.Fatalf("プレイヤー取得失敗: %v", err)
+			}
+			if player.Role != 0 || player.Color != "#00AAFF" {
+				t.Fatalf("不正なstartでDBのプレイヤー状態が更新されています: %+v", player)
+			}
+
+			roomState := GameHub.GetOrCreateRoom(roomID)
+			roomState.mu.RLock()
+			status := roomState.Status
+			isGMLoopActive := roomState.IsGMLoopActive
+			roomState.mu.RUnlock()
+			if status != 0 || isGMLoopActive {
+				t.Fatalf("不正なstartでメモリのルーム状態が更新されています: status=%d gm=%v", status, isGMLoopActive)
+			}
+		})
 	}
 }
 
@@ -405,7 +573,7 @@ func TestActiveRoomIsFinishedAndRemovedWhenEmpty(t *testing.T) {
 		t.Fatalf("想定外のイベント: %s", msg.Event)
 	}
 
-	sendJSON(t, wsConn, `{"action":"start"}`)
+	sendJSON(t, wsConn, `{"action":"start","oni_users":["player1"]}`)
 	if msg := readUntilEvent(t, wsConn, "start"); msg.TimeLimit != 900 {
 		t.Fatalf("startのtime_limitが不正です: %d", msg.TimeLimit)
 	}
@@ -453,7 +621,7 @@ func TestGracePeriodUsesSecondsAndMoveKeepsWorking(t *testing.T) {
 	}
 
 	startedAt := time.Now()
-	sendJSON(t, wsConn, `{"action":"start"}`)
+	sendJSON(t, wsConn, `{"action":"start","oni_users":["player1"]}`)
 	if msg := readUntilEvent(t, wsConn, "start"); msg.TimeLimit != 5 {
 		t.Fatalf("startのtime_limitが不正です: %d", msg.TimeLimit)
 	}
@@ -494,7 +662,7 @@ func TestSyncIntervalUsesSeconds(t *testing.T) {
 	}
 
 	sendJSON(t, wsConn, `{"action":"move","lat":34.7,"lng":135.5}`)
-	sendJSON(t, wsConn, `{"action":"start"}`)
+	sendJSON(t, wsConn, `{"action":"start","oni_users":["player1"]}`)
 	readUntilEvent(t, wsConn, "start")
 	readUntilEvent(t, wsConn, "game_active")
 
@@ -506,7 +674,7 @@ func TestSyncIntervalUsesSeconds(t *testing.T) {
 	if math.Abs(location.Lat-34.7) > 0.000001 || math.Abs(location.Lng-135.5) > 0.000001 {
 		t.Fatalf("syncの位置情報が不正です: %+v", location)
 	}
-	if location.Color != "#00AAFF" {
+	if location.Color != "black" {
 		t.Fatalf("syncのカラー情報が不正です: %+v", location)
 	}
 }
@@ -604,7 +772,7 @@ func TestTimeLimitEndsGameWithResult(t *testing.T) {
 		t.Fatalf("想定外のイベント: %s", msg.Event)
 	}
 
-	sendJSON(t, wsConn, `{"action":"start"}`)
+	sendJSON(t, wsConn, `{"action":"start","oni_users":["player1"]}`)
 	readUntilEvent(t, wsConn, "start")
 	readUntilEvent(t, wsConn, "game_active")
 
@@ -660,24 +828,18 @@ func TestAllRunnersCaughtEndsGameWithResult(t *testing.T) {
 		t.Fatalf("想定外のイベント: %s", msg.Event)
 	}
 
-	sendJSON(t, wsConn1, `{"action":"start"}`)
+	sendJSON(t, wsConn1, `{"action":"start","oni_users":["player1"]}`)
 	start1 := readUntilEvent(t, wsConn1, "start")
 	start2 := readUntilEvent(t, wsConn2, "start")
-
-	var runnerConn *websocket.Conn
-	runnerID := ""
-	if start1.Role != nil && *start1.Role == 0 {
-		runnerConn = wsConn1
-		runnerID = "player1"
+	if start1.Role == nil || *start1.Role != 1 {
+		t.Fatalf("player1は鬼になる想定です: %+v", start1)
 	}
-	if start2.Role != nil && *start2.Role == 0 {
-		runnerConn = wsConn2
-		runnerID = "player2"
-	}
-	if runnerConn == nil {
-		t.Fatalf("逃走者が割り当てられていません: role1=%v role2=%v", start1.Role, start2.Role)
+	if start2.Role == nil || *start2.Role != 0 {
+		t.Fatalf("player2は逃走者になる想定です: %+v", start2)
 	}
 
+	runnerConn := wsConn2
+	runnerID := "player2"
 	readUntilEvent(t, runnerConn, "game_active")
 	sendJSON(t, runnerConn, `{"action":"capture_response","approved":true}`)
 	readUntilEvent(t, runnerConn, "captured")

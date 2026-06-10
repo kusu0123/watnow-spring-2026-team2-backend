@@ -113,9 +113,16 @@ Content-Type: application/json
 
 ```json
 {
-  "action": "start"
+  "action": "start",
+  "oni_users": ["user-001"]
 }
 ```
+
+要点:
+
+- `oni_users` は鬼にする参加済み `user_id` の配列です。
+- `oni_users` が空、未指定、または未参加の `user_id` を含む場合は開始されず、送信元に `error` が届きます。
+- 鬼に指定されたプレイヤーの `color` はサーバー側で `black` に上書きされます。
 
 受信イベント:
 

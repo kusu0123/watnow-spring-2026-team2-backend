@@ -26,11 +26,13 @@
 
 ゲーム開始時の流れは以下です。
 
-1. フロントから WebSocket で `action: "start"` を送信します。
-2. サーバーが参加中のプレイヤーへ役割を割り当てます。
+1. フロントから WebSocket で `action: "start"` と `oni_users` を送信します。
+2. サーバーが `oni_users` に含まれる参加中プレイヤーを鬼、その他を逃走者にします。
 3. 各プレイヤーへ `event: "start"` が届きます。
 4. `grace_period` が終わると `event: "game_active"` が届きます。
 5. 本編中は `sync_interval` ごとに `event: "sync"` が届きます。
+
+鬼に指定されたプレイヤーの色は、ゲーム開始時にサーバー側で `black` に上書きされます。
 
 `start` と `game_active` は役割が違います。`start` はゲーム開始操作を受け付けた通知で、`game_active` は猶予時間後に本編を開始する通知です。
 
@@ -78,4 +80,3 @@
 WebSocket が切断されても、プレイヤー情報は DB に残ります。
 
 同じ `room_id` と `user_id` で `join` し直すと、保存済みの名前、役割、確保状態、位置、色をもとに復帰します。フロント側では `user_id` をリロード後も維持してください。
-
