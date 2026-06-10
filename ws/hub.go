@@ -336,20 +336,9 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 
 			GameHub.Register(roomID, client)
 
-			room.mu.RLock()
-			var names []string
-			for c := range room.Clients {
-				c.mu.Lock()
-				if c.Name != "" {
-					names = append(names, c.Name)
-				}
-				c.mu.Unlock()
-			}
-			room.mu.RUnlock()
-
 			room.Broadcast(OutgoingMessage{
 				Event:   "waiting",
-				Players: names,
+				Players: room.waitingPlayers(),
 			})
 
 		case "start":
