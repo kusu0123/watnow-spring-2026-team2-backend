@@ -834,6 +834,76 @@ func TestTimeLimitEndsGameWithResult(t *testing.T) {
 	})
 }
 
+func TestTimeLimitResultIncludesDisconnectedPlayersFromDB(t *testing.T) {
+	roomID := "disconnectedResultRoom"
+	db, baseURL, cleanup := newTestServer(t, models.Room{
+		ID:           roomID,
+		Status:       0,
+		TimeLimit:    1,
+		OniCount:     1,
+		SyncInterval: 1,
+		GracePeriod:  0,
+	})
+	defer cleanup()
+
+	oniConn := connectToRoom(t, baseURL, roomID)
+	defer oniConn.Close()
+	runnerConn := connectToRoom(t, baseURL, roomID)
+
+	sendJSON(t, oniConn, `{"action":"join","user_id":"player1","name":"はるき"}`)
+	if msg := readMessage(t, oniConn); msg.Event != "waiting" {
+		t.Fatalf("想定外のイベント: %s", msg.Event)
+	}
+
+	sendJSON(t, runnerConn, `{"action":"join","user_id":"player2","name":"みな"}`)
+	if msg := readMessage(t, oniConn); msg.Event != "waiting" {
+		t.Fatalf("想定外のイベント: %s", msg.Event)
+	}
+	if msg := readMessage(t, runnerConn); msg.Event != "waiting" {
+		t.Fatalf("想定外のイベント: %s", msg.Event)
+	}
+
+	sendJSON(t, oniConn, `{"action":"start","oni_users":["player1"]}`)
+	if msg := readUntilEvent(t, oniConn, "start"); msg.Role == nil || *msg.Role != 1 {
+		t.Fatalf("player1は鬼になる想定です: %+v", msg)
+	}
+	if msg := readUntilEvent(t, runnerConn, "start"); msg.Role == nil || *msg.Role != 0 {
+		t.Fatalf("player2は逃走者になる想定です: %+v", msg)
+	}
+
+	if err := runnerConn.Close(); err != nil {
+		t.Fatalf("切断失敗: %v", err)
+	}
+
+	room := GameHub.GetOrCreateRoom(roomID)
+	waitFor(t, func() bool {
+		_, ok := findClient(room, "player2")
+		return !ok
+	})
+
+	readUntilEvent(t, oniConn, "game_active")
+	msg := readUntilEvent(t, oniConn, "result")
+
+	result, ok := findResult(msg.Results, "player2")
+	if !ok {
+		t.Fatalf("切断済みプレイヤーがresultに含まれていません: %+v", msg.Results)
+	}
+	if result.Name != "みな" || result.Role != 0 || result.IsCaught {
+		t.Fatalf("切断済みプレイヤーの結果が不正です: %+v", result)
+	}
+	if len(msg.Survivors) != 1 || msg.Survivors[0] != "みな" {
+		t.Fatalf("切断済み逃走者がsurvivorsに含まれていません: %+v", msg.Survivors)
+	}
+
+	waitFor(t, func() bool {
+		var room models.Room
+		if err := db.First(&room, "id = ?", roomID).Error; err != nil {
+			return false
+		}
+		return room.Status == 2
+	})
+}
+
 func TestAllRunnersCaughtEndsGameWithResult(t *testing.T) {
 	roomID := "allCaughtRoom"
 	db, baseURL, cleanup := newTestServer(t, models.Room{
