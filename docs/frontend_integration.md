@@ -71,7 +71,7 @@ Content-Type: application/json
 - `time_limit`: 1 から 3600 秒
 - `oni_count`: 1 以上
 - `area_size`: 50 文字以下
-- `sync_interval`: 1 から 60 秒
+- `sync_interval`: 1 から 300 秒
 - `grace_period`: 0 から 300 秒
 
 現在の実装では、設定更新時に上記の項目をすべて送る前提です。一部項目だけを送ると、未指定の数値項目が `0` として扱われるため、フロント側ではフォームの全項目をまとめて送信してください。

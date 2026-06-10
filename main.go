@@ -77,8 +77,8 @@ func main() {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "鬼の人数は1人以上にしてください"})
 			return
 		}
-		if input.SyncInterval < 1 || input.SyncInterval > 60 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "更新頻度は1〜60の間で設定してください"})
+		if input.SyncInterval < 1 || input.SyncInterval > 300 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "更新頻度は1〜300の間で設定してください"})
 			return
 		}
 		if input.GracePeriod < 0 || input.GracePeriod > 300 {
