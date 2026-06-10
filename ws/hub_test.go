@@ -175,6 +175,27 @@ func findLocation(locations []LocationVal, userID string) (LocationVal, bool) {
 	return LocationVal{}, false
 }
 
+func findWaitingPlayer(players []WaitingPlayerVal, userID string) (WaitingPlayerVal, bool) {
+	for _, player := range players {
+		if player.UserID == userID {
+			return player, true
+		}
+	}
+	return WaitingPlayerVal{}, false
+}
+
+func assertWaitingPlayer(t *testing.T, msg OutgoingMessage, userID, name, color string) {
+	t.Helper()
+
+	player, ok := findWaitingPlayer(msg.Players, userID)
+	if !ok {
+		t.Fatalf("waitingに%sが含まれていません: %+v", userID, msg.Players)
+	}
+	if player.Name != name || player.Color != color {
+		t.Fatalf("waitingのプレイヤー情報が不正です: %+v", player)
+	}
+}
+
 func roomExists(roomID string) bool {
 	GameHub.mu.RLock()
 	defer GameHub.mu.RUnlock()
@@ -199,6 +220,7 @@ func TestWebSocketFlow(t *testing.T) {
 	if msg.Event != "waiting" {
 		t.Fatalf("想定外のイベント: %s", msg.Event)
 	}
+	assertWaitingPlayer(t, msg, "player1", "はるき", "#0000FF")
 
 	var player models.Player
 	if err := db.Where("room_id = ? AND user_id = ?", roomID, "player1").First(&player).Error; err != nil {
@@ -281,6 +303,7 @@ func TestReconnectRestoresPlayerState(t *testing.T) {
 	if msg.Event != "waiting" {
 		t.Fatalf("想定外のイベント: %s", msg.Event)
 	}
+	assertWaitingPlayer(t, msg, "player1", "新しい名前", "red")
 
 	room := GameHub.GetOrCreateRoom(roomID)
 	client, ok := findClient(room, "player1")
@@ -416,14 +439,25 @@ func TestStartUsesDesignatedOniAndOverwritesOnlyOniColor(t *testing.T) {
 	sendJSON(t, wsConn1, `{"action":"join","user_id":"player1","name":"はるき","color":"#00AAFF"}`)
 	if msg := readMessage(t, wsConn1); msg.Event != "waiting" {
 		t.Fatalf("想定外のイベント: %s", msg.Event)
+	} else {
+		assertWaitingPlayer(t, msg, "player1", "はるき", "#00AAFF")
 	}
 
 	sendJSON(t, wsConn2, `{"action":"join","user_id":"player2","name":"みな","color":"#FF00AA"}`)
 	if msg := readMessage(t, wsConn1); msg.Event != "waiting" {
 		t.Fatalf("想定外のイベント: %s", msg.Event)
+	} else {
+		if len(msg.Players) != 2 || msg.Players[0].UserID != "player1" || msg.Players[1].UserID != "player2" {
+			t.Fatalf("waitingのplayers順序が不正です: %+v", msg.Players)
+		}
+		assertWaitingPlayer(t, msg, "player1", "はるき", "#00AAFF")
+		assertWaitingPlayer(t, msg, "player2", "みな", "#FF00AA")
 	}
 	if msg := readMessage(t, wsConn2); msg.Event != "waiting" {
 		t.Fatalf("想定外のイベント: %s", msg.Event)
+	} else {
+		assertWaitingPlayer(t, msg, "player1", "はるき", "#00AAFF")
+		assertWaitingPlayer(t, msg, "player2", "みな", "#FF00AA")
 	}
 
 	sendJSON(t, wsConn1, `{"action":"start","oni_users":["player2"]}`)
@@ -571,6 +605,8 @@ func TestActiveRoomIsFinishedAndRemovedWhenEmpty(t *testing.T) {
 	sendJSON(t, wsConn, `{"action":"join","user_id":"player1","name":"はるき"}`)
 	if msg := readMessage(t, wsConn); msg.Event != "waiting" {
 		t.Fatalf("想定外のイベント: %s", msg.Event)
+	} else {
+		assertWaitingPlayer(t, msg, "player1", "はるき", "")
 	}
 
 	sendJSON(t, wsConn, `{"action":"start","oni_users":["player1"]}`)

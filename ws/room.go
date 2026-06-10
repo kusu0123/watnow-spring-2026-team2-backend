@@ -60,6 +60,31 @@ func (room *RoomState) clientList() []*Client {
 	return clients
 }
 
+func (room *RoomState) waitingPlayers() []WaitingPlayerVal {
+	clients := room.clientList()
+	players := make([]WaitingPlayerVal, 0, len(clients))
+
+	for _, client := range clients {
+		client.mu.Lock()
+		player := WaitingPlayerVal{
+			UserID: client.UserID,
+			Name:   client.Name,
+			Color:  client.Color,
+		}
+		client.mu.Unlock()
+
+		if player.Name != "" {
+			players = append(players, player)
+		}
+	}
+
+	sort.Slice(players, func(i, j int) bool {
+		return players[i].UserID < players[j].UserID
+	})
+
+	return players
+}
+
 func (room *RoomState) locations() []LocationVal {
 	clients := room.clientList()
 	locations := make([]LocationVal, 0, len(clients))

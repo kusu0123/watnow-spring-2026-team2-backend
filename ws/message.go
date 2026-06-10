@@ -15,17 +15,24 @@ type IncomingMessage struct {
 
 // フロントエンドへ送信するデータ
 type OutgoingMessage struct {
-	Event        string        `json:"event"`
-	Message      string        `json:"message,omitempty"`
-	Players      []string      `json:"players,omitempty"`
-	Role         *int          `json:"role,omitempty"`
-	TimeLimit    int           `json:"time_limit,omitempty"`
-	TargetID     string        `json:"target_id,omitempty"`
-	AttackerName string        `json:"attacker_name,omitempty"`
-	Approved     bool          `json:"approved,omitempty"`
-	Locations    []LocationVal `json:"locations,omitempty"`
-	Survivors    []string      `json:"survivors,omitempty"`
-	Results      []ResultVal   `json:"results,omitempty"`
+	Event        string             `json:"event"`
+	Message      string             `json:"message,omitempty"`
+	Players      []WaitingPlayerVal `json:"players,omitempty"`
+	Role         *int               `json:"role,omitempty"`
+	TimeLimit    int                `json:"time_limit,omitempty"`
+	TargetID     string             `json:"target_id,omitempty"`
+	AttackerName string             `json:"attacker_name,omitempty"`
+	Approved     bool               `json:"approved,omitempty"`
+	Locations    []LocationVal      `json:"locations,omitempty"`
+	Survivors    []string           `json:"survivors,omitempty"`
+	Results      []ResultVal        `json:"results,omitempty"`
+}
+
+// 待機中プレイヤーのまとまり
+type WaitingPlayerVal struct {
+	UserID string `json:"user_id"`
+	Name   string `json:"name"`
+	Color  string `json:"color"`
 }
 
 // 位置情報のまとまり
