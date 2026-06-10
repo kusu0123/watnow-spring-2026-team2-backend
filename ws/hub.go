@@ -359,6 +359,50 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				sendError(client, "ゲームはすでに開始しています")
 				continue
 			}
+			if len(msg.OniUsers) == 0 {
+				room.mu.Unlock()
+				sendError(client, "鬼に指定するユーザーを1人以上選択してください")
+				continue
+			}
+
+			oniUsers := make(map[string]bool, len(msg.OniUsers))
+			validStart := true
+			errorMessage := ""
+			for _, userID := range msg.OniUsers {
+				if userID == "" {
+					validStart = false
+					errorMessage = "鬼に指定されたユーザーIDが不正です"
+					break
+				}
+				oniUsers[userID] = true
+			}
+			if !validStart {
+				room.mu.Unlock()
+				sendError(client, errorMessage)
+				continue
+			}
+
+			joinedUsers := make(map[string]bool, len(room.Clients))
+			for c := range room.Clients {
+				c.mu.Lock()
+				if c.UserID != "" {
+					joinedUsers[c.UserID] = true
+				}
+				c.mu.Unlock()
+			}
+			for userID := range oniUsers {
+				if !joinedUsers[userID] {
+					validStart = false
+					errorMessage = "鬼に指定されたユーザーが参加していません"
+					break
+				}
+			}
+			if !validStart {
+				room.mu.Unlock()
+				sendError(client, errorMessage)
+				continue
+			}
+
 			room.TimeLimit, room.SyncInterval, room.GracePeriod = cleanGameSettings(room.TimeLimit, room.SyncInterval, room.GracePeriod)
 			room.Status = 1
 			room.IsGMLoopActive = true
@@ -366,46 +410,40 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 			room.StartAt = time.Now().Add(time.Duration(room.GracePeriod) * time.Second)
 			room.ActiveAt = time.Time{}
 
-			// 鬼の人数（oni_count）を正規化して役割を割り当て
-			playerCount := len(room.Clients)
-			oniCount := room.OniCount
-			if playerCount == 0 {
-				oniCount = 0
-			} else {
-				if oniCount < 1 {
-					oniCount = 1
-				}
-				if oniCount > playerCount {
-					oniCount = playerCount
-				}
+			type playerStartState struct {
+				Client        *Client
+				UserID        string
+				Role          int
+				Color         string
+				PreviousRole  int
+				PreviousColor string
 			}
 
-			type roleSave struct {
-				UserID string
-				Role   int
-			}
-
-			var roleSaves []roleSave
-			oniAssigned := 0
+			var playerStates []playerStartState
 			for c := range room.Clients {
 				c.mu.Lock()
-				if oniAssigned < oniCount {
-					c.Role = 1 // 鬼
-					oniAssigned++
-				} else {
-					c.Role = 0 // 逃走者
-				}
 				if c.UserID != "" {
-					roleSaves = append(roleSaves, roleSave{
-						UserID: c.UserID,
-						Role:   c.Role,
+					previousRole := c.Role
+					previousColor := c.Color
+					c.Role = 0
+					if oniUsers[c.UserID] {
+						c.Role = 1
+						c.Color = "black"
+					}
+					playerStates = append(playerStates, playerStartState{
+						Client:        c,
+						UserID:        c.UserID,
+						Role:          c.Role,
+						Color:         c.Color,
+						PreviousRole:  previousRole,
+						PreviousColor: previousColor,
 					})
 				}
 				c.mu.Unlock()
 			}
 			room.mu.Unlock()
 
-			if err := db.Model(&models.Room{}).Where("id = ?", roomID).Update("status", 1).Error; err != nil {
+			rollbackStart := func() {
 				room.mu.Lock()
 				if room.Status == 1 {
 					room.Status = 0
@@ -414,15 +452,47 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 					room.StartAt = time.Time{}
 					room.ActiveAt = time.Time{}
 				}
+				for _, state := range playerStates {
+					state.Client.mu.Lock()
+					state.Client.Role = state.PreviousRole
+					state.Client.Color = state.PreviousColor
+					state.Client.mu.Unlock()
+				}
 				room.mu.Unlock()
+			}
+
+			if err := db.Model(&models.Room{}).Where("id = ?", roomID).Update("status", 1).Error; err != nil {
+				rollbackStart()
 				sendError(client, "ゲーム開始状態の保存に失敗しました")
 				continue
 			}
 
-			for _, roleSave := range roleSaves {
-				if err := db.Model(&models.Player{}).Where("room_id = ? AND user_id = ?", roomID, roleSave.UserID).Update("role", roleSave.Role).Error; err != nil {
-					continue
+			saveFailed := false
+			for _, state := range playerStates {
+				updates := map[string]interface{}{"role": state.Role}
+				if state.Role == 1 {
+					updates["color"] = state.Color
 				}
+				if err := db.Model(&models.Player{}).Where("room_id = ? AND user_id = ?", roomID, state.UserID).Updates(updates).Error; err != nil {
+					saveFailed = true
+					break
+				}
+			}
+			if saveFailed {
+				rollbackStart()
+				if err := db.Model(&models.Room{}).Where("id = ?", roomID).Update("status", 0).Error; err != nil {
+					log.Printf("[Error] Room: %s | ゲーム開始状態の巻き戻しに失敗しました: %v\n", roomID, err)
+				}
+				for _, state := range playerStates {
+					if err := db.Model(&models.Player{}).Where("room_id = ? AND user_id = ?", roomID, state.UserID).Updates(map[string]interface{}{
+						"role":  state.PreviousRole,
+						"color": state.PreviousColor,
+					}).Error; err != nil {
+						log.Printf("[Error] Room: %s | User: %s | プレイヤー状態の巻き戻しに失敗しました: %v\n", roomID, state.UserID, err)
+					}
+				}
+				sendError(client, "プレイヤー情報の保存に失敗しました")
+				continue
 			}
 
 			// 開始通知（フロントエンド側はこの通知で猶予時間のカウントダウンUIを出す）

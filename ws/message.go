@@ -2,14 +2,15 @@ package ws
 
 // フロントエンドから送られてくるデータ
 type IncomingMessage struct {
-	Action   string  `json:"action"`
-	UserID   string  `json:"user_id,omitempty"`
-	Name     string  `json:"name,omitempty"`
-	TargetID string  `json:"target_id,omitempty"`
-	Approved bool    `json:"approved,omitempty"`
-	Lat      float64 `json:"lat,omitempty"`
-	Lng      float64 `json:"lng,omitempty"`
-	Color    string  `json:"color,omitempty"`
+	Action   string   `json:"action"`
+	UserID   string   `json:"user_id,omitempty"`
+	Name     string   `json:"name,omitempty"`
+	TargetID string   `json:"target_id,omitempty"`
+	Approved bool     `json:"approved,omitempty"`
+	Lat      float64  `json:"lat,omitempty"`
+	Lng      float64  `json:"lng,omitempty"`
+	Color    string   `json:"color,omitempty"`
+	OniUsers []string `json:"oni_users,omitempty"`
 }
 
 // フロントエンドへ送信するデータ

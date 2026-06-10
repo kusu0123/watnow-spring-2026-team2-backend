@@ -108,10 +108,11 @@ REST API の routing は `main.go` に残し、`ws` には WebSocket とゲー�
 
 開始時:
 
-- `start` action を受け取る
+- `oni_users` 付きの `start` action を受け取る
 - `RoomState.Status` を `1` にする
 - DB の `rooms.status` も `1` にする
-- 接続中 player に role を割り当てる
+- `oni_users` に含まれる接続中 player を鬼、その他を逃走者にする
+- 鬼の color を `black` に上書きし、DB の `players` に保存する
 - 各 client に `start` event を送る
 - 猶予時間後に `game_active` event を送る
 
