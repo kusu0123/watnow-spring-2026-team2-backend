@@ -20,12 +20,33 @@ type OutgoingMessage struct {
 	Players      []WaitingPlayerVal `json:"players,omitempty"`
 	Role         *int               `json:"role,omitempty"`
 	TimeLimit    int                `json:"time_limit,omitempty"`
+	OniCount     int                `json:"oni_count,omitempty"`
+	AreaSize     string             `json:"area_size,omitempty"`
+	SyncInterval int                `json:"sync_interval,omitempty"`
+	GracePeriod  int                `json:"grace_period,omitempty"`
+	AreaCenter   *AreaCenterVal     `json:"area_center,omitempty"`
+	OniUsers     []string           `json:"oni_users,omitempty"`
 	TargetID     string             `json:"target_id,omitempty"`
 	AttackerName string             `json:"attacker_name,omitempty"`
 	Approved     bool               `json:"approved,omitempty"`
 	Locations    []LocationVal      `json:"locations,omitempty"`
 	Survivors    []string           `json:"survivors,omitempty"`
 	Results      []ResultVal        `json:"results,omitempty"`
+}
+
+type RoomSettingsMessage struct {
+	Event        string         `json:"event"`
+	TimeLimit    int            `json:"time_limit"`
+	OniCount     int            `json:"oni_count"`
+	AreaSize     string         `json:"area_size"`
+	SyncInterval int            `json:"sync_interval"`
+	GracePeriod  int            `json:"grace_period"`
+	AreaCenter   *AreaCenterVal `json:"area_center"`
+}
+
+type AreaCenterVal struct {
+	Lat float64 `json:"lat"`
+	Lng float64 `json:"lng"`
 }
 
 // 待機中プレイヤーのまとまり

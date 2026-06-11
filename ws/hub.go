@@ -40,6 +40,9 @@ type RoomState struct {
 	AreaSize       string
 	SyncInterval   int // 追加
 	GracePeriod    int // 追加
+	AreaCenterLat  float64
+	AreaCenterLng  float64
+	HasAreaCenter  bool
 	StartAt        time.Time
 	ActiveAt       time.Time
 	IsGameActive   bool
@@ -85,6 +88,24 @@ func (h *Hub) UpdateRoomSettings(roomID string, timeLimit, oniCount int, areaSiz
 	room.AreaSize = areaSize
 	room.SyncInterval = syncInterval
 	room.GracePeriod = gracePeriod
+}
+
+func (h *Hub) UpdateRoomSettingsFromModel(room models.Room) *RoomState {
+	timeLimit, syncInterval, gracePeriod := cleanGameSettings(room.TimeLimit, room.SyncInterval, room.GracePeriod)
+
+	roomState := h.GetOrCreateRoom(room.ID)
+	roomState.mu.Lock()
+	defer roomState.mu.Unlock()
+	roomState.Status = room.Status
+	roomState.TimeLimit = timeLimit
+	roomState.OniCount = room.OniCount
+	roomState.AreaSize = room.AreaSize
+	roomState.SyncInterval = syncInterval
+	roomState.GracePeriod = gracePeriod
+	roomState.AreaCenterLat = room.AreaCenterLat
+	roomState.AreaCenterLng = room.AreaCenterLng
+	roomState.HasAreaCenter = room.HasAreaCenter
+	return roomState
 }
 
 func (h *Hub) GetOrCreateRoom(roomID string) *RoomState {
@@ -202,17 +223,13 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 	}
 
 	roomState := GameHub.GetOrCreateRoom(roomID)
-	roomState.mu.Lock()
-	if roomState.Status == 0 && !roomState.IsGMLoopActive {
-		timeLimit, syncInterval, gracePeriod := cleanGameSettings(room.TimeLimit, room.SyncInterval, room.GracePeriod)
-		roomState.Status = room.Status
-		roomState.TimeLimit = timeLimit
-		roomState.OniCount = room.OniCount
-		roomState.AreaSize = room.AreaSize
-		roomState.SyncInterval = syncInterval
-		roomState.GracePeriod = gracePeriod
+	roomState.mu.RLock()
+	shouldSyncRoom := roomState.Status == 0 && !roomState.IsGMLoopActive
+	roomState.mu.RUnlock()
+
+	if shouldSyncRoom {
+		GameHub.UpdateRoomSettingsFromModel(room)
 	}
-	roomState.mu.Unlock()
 
 	client := &Client{
 		Conn:   conn,
@@ -343,6 +360,9 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				Event:   "waiting",
 				Players: room.waitingPlayers(),
 			})
+			if err := sendToClient(client, room.roomSettingsMessage()); err != nil {
+				log.Printf("[Info] Room: %s | User: %s | room_settings送信に失敗しました: %v\n", roomID, player.UserID, err)
+			}
 
 		case "start":
 			room.mu.Lock()
@@ -357,6 +377,7 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				continue
 			}
 
+			selectedOniUsers := append([]string(nil), msg.OniUsers...)
 			oniUsers := make(map[string]bool, len(msg.OniUsers))
 			validStart := true
 			errorMessage := ""
@@ -496,6 +517,7 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 					Event:     "start",
 					Role:      &role,
 					TimeLimit: room.TimeLimit,
+					OniUsers:  selectedOniUsers,
 				})
 				c.mu.Unlock()
 			}

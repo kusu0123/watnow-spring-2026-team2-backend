@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -30,6 +31,26 @@ func main() {
 	if err := db.AutoMigrate(&models.Room{}, &models.Player{}); err != nil {
 		panic("DBマイグレーション失敗: " + err.Error())
 	}
+	r := setupRouter(db)
+
+	r.Run(":8080")
+}
+
+type areaCenterInput struct {
+	Lat float64 `json:"lat"`
+	Lng float64 `json:"lng"`
+}
+
+type roomSettingsInput struct {
+	TimeLimit    int              `json:"time_limit"`
+	OniCount     int              `json:"oni_count"`
+	AreaSize     string           `json:"area_size"`
+	SyncInterval int              `json:"sync_interval"`
+	GracePeriod  int              `json:"grace_period"`
+	AreaCenter   *areaCenterInput `json:"area_center"`
+}
+
+func setupRouter(db *gorm.DB) *gin.Engine {
 	r := gin.Default()
 
 	r.GET("/ws/rooms/:id", func(c *gin.Context) {
@@ -54,17 +75,21 @@ func main() {
 	r.PUT("/rooms/:id", func(c *gin.Context) {
 		roomID := c.Param("id")
 
-		var input struct {
-			TimeLimit    int    `json:"time_limit"`
-			OniCount     int    `json:"oni_count"`
-			AreaSize     string `json:"area_size"`
-			SyncInterval int    `json:"sync_interval"`
-			GracePeriod  int    `json:"grace_period"`
-		}
+		var input roomSettingsInput
 
 		// 1. まずJSONを受け取る（データを変数 input に入れる）
 		if err := c.ShouldBindJSON(&input); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "無効なデータ形式です"})
+			return
+		}
+
+		var room models.Room
+		if err := db.First(&room, "id = ?", roomID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				c.JSON(http.StatusNotFound, gin.H{"error": "Room not found"})
+				return
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "ルーム取得に失敗しました"})
 			return
 		}
 
@@ -89,26 +114,40 @@ func main() {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "エリアの文字数が長すぎます"})
 			return
 		}
+		if input.AreaCenter != nil {
+			if input.AreaCenter.Lat < -90 || input.AreaCenter.Lat > 90 || input.AreaCenter.Lng < -180 || input.AreaCenter.Lng > 180 {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "中心地点の座標が不正です"})
+				return
+			}
+		}
 
 		// DBの更新（0値も更新したいので map で Updates する）
-		tx := db.Model(&models.Room{}).Where("id = ?", roomID).Updates(map[string]interface{}{
+		updates := map[string]interface{}{
 			"time_limit":    input.TimeLimit,
 			"oni_count":     input.OniCount,
 			"area_size":     input.AreaSize,
 			"sync_interval": input.SyncInterval,
 			"grace_period":  input.GracePeriod,
-		})
-		if tx.Error != nil {
+		}
+		if input.AreaCenter != nil {
+			updates["area_center_lat"] = input.AreaCenter.Lat
+			updates["area_center_lng"] = input.AreaCenter.Lng
+			updates["has_area_center"] = true
+		}
+
+		if err := db.Model(&models.Room{}).Where("id = ?", roomID).Updates(updates).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "設定の保存に失敗しました"})
 			return
 		}
-		if tx.RowsAffected == 0 {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Room not found"})
+		var updatedRoom models.Room
+		if err := db.First(&updatedRoom, "id = ?", roomID).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "設定の保存に失敗しました"})
 			return
 		}
 
 		// WebSocket側のメモリ(GameHub)に最新の設定を同期させる
-		ws.GameHub.UpdateRoomSettings(roomID, input.TimeLimit, input.OniCount, input.AreaSize, input.SyncInterval, input.GracePeriod)
+		roomState := ws.GameHub.UpdateRoomSettingsFromModel(updatedRoom)
+		roomState.BroadcastRoomSettings()
 
 		c.JSON(http.StatusOK, gin.H{
 			"status":  "success",
@@ -116,5 +155,5 @@ func main() {
 		})
 	})
 
-	r.Run(":8080")
+	return r
 }
