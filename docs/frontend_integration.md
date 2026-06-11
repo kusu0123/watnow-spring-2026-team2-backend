@@ -62,7 +62,11 @@ Content-Type: application/json
   "oni_count": 1,
   "area_size": "school-yard",
   "sync_interval": 3,
-  "grace_period": 30
+  "grace_period": 30,
+  "area_center": {
+    "lat": 34.0,
+    "lng": 135.0
+  }
 }
 ```
 
@@ -73,8 +77,10 @@ Content-Type: application/json
 - `area_size`: 50 文字以下
 - `sync_interval`: 1 から 300 秒
 - `grace_period`: 0 から 300 秒
+- `area_center`: 任意。指定する場合、`lat` は -90 から 90、`lng` は -180 から 180
 
-現在の実装では、設定更新時に上記の項目をすべて送る前提です。一部項目だけを送ると、未指定の数値項目が `0` として扱われるため、フロント側ではフォームの全項目をまとめて送信してください。
+現在の実装では、設定更新時に `time_limit`, `oni_count`, `area_size`, `sync_interval`, `grace_period` をすべて送る前提です。一部項目だけを送ると、未指定の数値項目が `0` として扱われるため、フロント側ではフォームの全項目をまとめて送信してください。
+`area_center` は任意項目です。未指定または `null` の場合、保存済みの中心地点は変更されません。
 
 ## WebSocket: 送信 action
 
@@ -130,7 +136,8 @@ Content-Type: application/json
 {
   "event": "start",
   "role": 1,
-  "time_limit": 900
+  "time_limit": 900,
+  "oni_users": ["user-001"]
 }
 ```
 
@@ -216,6 +223,27 @@ Content-Type: application/json
 ```
 
 ## WebSocket: 受信 event
+
+### room_settings
+
+ルーム設定更新後は接続中の全クライアントへ届きます。`join` 成功直後にも、参加したクライアントだけへ現在の設定が届きます。
+
+```json
+{
+  "event": "room_settings",
+  "time_limit": 900,
+  "oni_count": 1,
+  "area_size": "500m",
+  "sync_interval": 180,
+  "grace_period": 120,
+  "area_center": {
+    "lat": 34.0,
+    "lng": 135.0
+  }
+}
+```
+
+中心地点が未設定の場合、`area_center` は `null` です。
 
 ### sync
 

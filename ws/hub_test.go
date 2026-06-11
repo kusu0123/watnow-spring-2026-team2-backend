@@ -74,7 +74,7 @@ func sendJSON(t *testing.T, wsConn *websocket.Conn, body string) {
 	}
 }
 
-func readMessage(t *testing.T, wsConn *websocket.Conn) OutgoingMessage {
+func readRawMessage(t *testing.T, wsConn *websocket.Conn) OutgoingMessage {
 	t.Helper()
 
 	wsConn.SetReadDeadline(time.Now().Add(2 * time.Second))
@@ -89,6 +89,34 @@ func readMessage(t *testing.T, wsConn *websocket.Conn) OutgoingMessage {
 	}
 
 	return msg
+}
+
+func readMessage(t *testing.T, wsConn *websocket.Conn) OutgoingMessage {
+	t.Helper()
+
+	for i := 0; i < 8; i++ {
+		msg := readRawMessage(t, wsConn)
+		if msg.Event != "room_settings" {
+			return msg
+		}
+	}
+
+	t.Fatal("room_settings以外のイベントを受信できませんでした")
+	return OutgoingMessage{}
+}
+
+func readRawUntilEvent(t *testing.T, wsConn *websocket.Conn, event string) OutgoingMessage {
+	t.Helper()
+
+	for i := 0; i < 8; i++ {
+		msg := readRawMessage(t, wsConn)
+		if msg.Event == event {
+			return msg
+		}
+	}
+
+	t.Fatalf("%s イベントを受信できませんでした", event)
+	return OutgoingMessage{}
 }
 
 func readUntilEvent(t *testing.T, wsConn *websocket.Conn, event string) OutgoingMessage {
@@ -117,13 +145,23 @@ func assertErrorMessage(t *testing.T, wsConn *websocket.Conn, message string) {
 func assertNoMessage(t *testing.T, wsConn *websocket.Conn) {
 	t.Helper()
 
-	wsConn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
-	_, _, err := wsConn.ReadMessage()
-	if err == nil {
-		t.Fatal("通知されないはずのクライアントがメッセージを受信しました")
-	}
-	if netErr, ok := err.(net.Error); !ok || !netErr.Timeout() {
-		t.Fatalf("想定外の読み取りエラーです: %v", err)
+	for {
+		wsConn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+		_, payload, err := wsConn.ReadMessage()
+		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				return
+			}
+			t.Fatalf("想定外の読み取りエラーです: %v", err)
+		}
+
+		var msg OutgoingMessage
+		if err := json.Unmarshal(payload, &msg); err != nil {
+			t.Fatalf("JSONパース失敗: %v", err)
+		}
+		if msg.Event != "room_settings" {
+			t.Fatalf("通知されないはずのクライアントがメッセージを受信しました: %+v", msg)
+		}
 	}
 }
 
@@ -193,6 +231,26 @@ func assertWaitingPlayer(t *testing.T, msg OutgoingMessage, userID, name, color 
 	}
 	if player.Name != name || player.Color != color {
 		t.Fatalf("waitingのプレイヤー情報が不正です: %+v", player)
+	}
+}
+
+func assertRoomSettings(t *testing.T, msg OutgoingMessage, timeLimit, oniCount int, areaSize string, syncInterval, gracePeriod int, areaCenter *AreaCenterVal) {
+	t.Helper()
+
+	if msg.Event != "room_settings" {
+		t.Fatalf("room_settingsではないイベントを受信しました: %+v", msg)
+	}
+	if msg.TimeLimit != timeLimit || msg.OniCount != oniCount || msg.AreaSize != areaSize || msg.SyncInterval != syncInterval || msg.GracePeriod != gracePeriod {
+		t.Fatalf("room_settingsの設定値が不正です: %+v", msg)
+	}
+	if areaCenter == nil {
+		if msg.AreaCenter != nil {
+			t.Fatalf("area_centerはnull想定です: %+v", msg.AreaCenter)
+		}
+		return
+	}
+	if msg.AreaCenter == nil || math.Abs(msg.AreaCenter.Lat-areaCenter.Lat) > 0.000001 || math.Abs(msg.AreaCenter.Lng-areaCenter.Lng) > 0.000001 {
+		t.Fatalf("area_centerが不正です: %+v", msg.AreaCenter)
 	}
 }
 
@@ -269,6 +327,34 @@ func TestWebSocketRoomNotFound(t *testing.T) {
 	if resp != nil && resp.StatusCode != 404 {
 		t.Errorf("期待するステータスコードは404ですが、受け取ったのは %d です", resp.StatusCode)
 	}
+}
+
+func TestJoinSendsRoomSettingsToJoiningClient(t *testing.T) {
+	roomID := "joinSettingsRoom"
+	_, baseURL, cleanup := newTestServer(t, models.Room{
+		ID:            roomID,
+		Status:        0,
+		TimeLimit:     900,
+		OniCount:      1,
+		AreaSize:      "500m",
+		SyncInterval:  180,
+		GracePeriod:   120,
+		AreaCenterLat: 34.0,
+		AreaCenterLng: 135.0,
+		HasAreaCenter: true,
+	})
+	defer cleanup()
+
+	wsConn := connectToRoom(t, baseURL, roomID)
+	defer wsConn.Close()
+
+	sendJSON(t, wsConn, `{"action":"join","user_id":"player1","name":"はるき","color":"#0000FF"}`)
+	if msg := readRawMessage(t, wsConn); msg.Event != "waiting" {
+		t.Fatalf("想定外のイベント: %s", msg.Event)
+	}
+
+	settings := readRawMessage(t, wsConn)
+	assertRoomSettings(t, settings, 900, 1, "500m", 180, 120, &AreaCenterVal{Lat: 34.0, Lng: 135.0})
 }
 
 func TestReconnectRestoresPlayerState(t *testing.T) {
@@ -379,6 +465,9 @@ func TestWebSocketStartFlowWithSettings(t *testing.T) {
 			if msg.Role == nil || *msg.Role != 1 {
 				t.Fatalf("startのroleが不正です: %v", msg.Role)
 			}
+			if len(msg.OniUsers) != 1 || msg.OniUsers[0] != "player1" {
+				t.Fatalf("startのoni_usersが不正です: %+v", msg.OniUsers)
+			}
 		case "game_active":
 			gotGameActive = true
 		}
@@ -468,6 +557,9 @@ func TestStartUsesDesignatedOniAndOverwritesOnlyOniColor(t *testing.T) {
 	}
 	if start2.Role == nil || *start2.Role != 1 {
 		t.Fatalf("player2は鬼になる想定です: %+v", start2)
+	}
+	if len(start1.OniUsers) != 1 || start1.OniUsers[0] != "player2" || len(start2.OniUsers) != 1 || start2.OniUsers[0] != "player2" {
+		t.Fatalf("startのoni_usersが不正です: player1=%+v player2=%+v", start1.OniUsers, start2.OniUsers)
 	}
 
 	var runner models.Player

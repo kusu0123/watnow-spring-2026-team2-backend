@@ -24,6 +24,16 @@ func cleanGameSettings(timeLimit, syncInterval, gracePeriod int) (int, int, int)
 	return timeLimit, syncInterval, gracePeriod
 }
 
+func sendToClient(client *Client, msg interface{}) error {
+	client.mu.Lock()
+	defer client.mu.Unlock()
+
+	_ = client.Conn.SetWriteDeadline(time.Now().Add(writeWait))
+	err := client.Conn.WriteJSON(msg)
+	_ = client.Conn.SetWriteDeadline(time.Time{})
+	return err
+}
+
 func (room *RoomState) Broadcast(msg interface{}) {
 	// 1. 部屋のロックを取得して、送信先（クライアント）のリストだけをコピーする
 	room.mu.RLock()
@@ -35,18 +45,44 @@ func (room *RoomState) Broadcast(msg interface{}) {
 
 	// 2. コピーしたリストに対して、順番に送信していく
 	for _, client := range clients {
-		client.mu.Lock()
-		_ = client.Conn.SetWriteDeadline(time.Now().Add(writeWait))
-		err := client.Conn.WriteJSON(msg)
-		_ = client.Conn.SetWriteDeadline(time.Time{})
-		client.mu.Unlock()
-
 		// 送信に失敗した場合（すでに通信が切れている等）はログだけ残す
 		// ※完全に切断されている場合は、先ほど作ったPing/Pong機能が自動で回収してくれます
-		if err != nil {
+		if err := sendToClient(client, msg); err != nil {
 			log.Printf("[Info] ユーザー %s へのBroadcast送信に失敗しました\n", client.UserID)
 		}
 	}
+}
+
+func (room *RoomState) roomSettingsMessage() RoomSettingsMessage {
+	room.mu.RLock()
+	defer room.mu.RUnlock()
+
+	timeLimit, syncInterval, gracePeriod := cleanGameSettings(room.TimeLimit, room.SyncInterval, room.GracePeriod)
+	var areaCenter *AreaCenterVal
+	if room.HasAreaCenter {
+		areaCenter = &AreaCenterVal{
+			Lat: room.AreaCenterLat,
+			Lng: room.AreaCenterLng,
+		}
+	}
+
+	return RoomSettingsMessage{
+		Event:        "room_settings",
+		TimeLimit:    timeLimit,
+		OniCount:     room.OniCount,
+		AreaSize:     room.AreaSize,
+		SyncInterval: syncInterval,
+		GracePeriod:  gracePeriod,
+		AreaCenter:   areaCenter,
+	}
+}
+
+func (room *RoomState) RoomSettingsMessage() RoomSettingsMessage {
+	return room.roomSettingsMessage()
+}
+
+func (room *RoomState) BroadcastRoomSettings() {
+	room.Broadcast(room.RoomSettingsMessage())
 }
 
 func (room *RoomState) clientList() []*Client {
