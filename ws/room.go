@@ -106,6 +106,7 @@ func (room *RoomState) waitingPlayers() []WaitingPlayerVal {
 			UserID: client.UserID,
 			Name:   client.Name,
 			Color:  client.Color,
+			PhotoURL: client.PhotoURL,
 		}
 		client.mu.Unlock()
 
@@ -133,6 +134,7 @@ func (room *RoomState) locations() []LocationVal {
 			Lng:      client.Lng,
 			IsCaught: client.IsCaught,
 			Color:    client.Color,
+			PhotoURL: client.PhotoURL,
 		})
 		client.mu.Unlock()
 	}
@@ -159,6 +161,7 @@ func (room *RoomState) resultMessage(roomID string, db *gorm.DB) (OutgoingMessag
 			Name:     player.Name,
 			Role:     player.Role,
 			IsCaught: player.IsCaught,
+			PhotoURL: player.PhotoURL,
 		}
 
 		if result.Role == 0 && !result.IsCaught {
