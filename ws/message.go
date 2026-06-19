@@ -11,6 +11,7 @@ type IncomingMessage struct {
 	Lng      float64  `json:"lng,omitempty"`
 	Color    string   `json:"color,omitempty"`
 	OniUsers []string `json:"oni_users,omitempty"`
+	PhotoURL string   `json:"photo_url,omitempty"`
 }
 
 // フロントエンドへ送信するデータ
@@ -29,6 +30,7 @@ type OutgoingMessage struct {
 	TargetID     string             `json:"target_id,omitempty"`
 	AttackerName string             `json:"attacker_name,omitempty"`
 	Approved     bool               `json:"approved,omitempty"`
+	PhotoURL     string             `json:"photo_url,omitempty"`
 	Locations    []LocationVal      `json:"locations,omitempty"`
 	Survivors    []string           `json:"survivors,omitempty"`
 	Results      []ResultVal        `json:"results,omitempty"`
@@ -54,6 +56,7 @@ type WaitingPlayerVal struct {
 	UserID string `json:"user_id"`
 	Name   string `json:"name"`
 	Color  string `json:"color"`
+	PhotoURL string `json:"photo_url,omitempty"`
 }
 
 // 位置情報のまとまり
@@ -63,6 +66,7 @@ type LocationVal struct {
 	Lng      float64 `json:"lng"`
 	IsCaught bool    `json:"is_caught"`
 	Color    string  `json:"color"`
+	PhotoURL string  `json:"photo_url,omitempty"`
 }
 
 // 結果発表用のまとまり
@@ -71,4 +75,5 @@ type ResultVal struct {
 	Name     string `json:"name"`
 	Role     int    `json:"role"`
 	IsCaught bool   `json:"is_caught"`
+	PhotoURL string `json:"photo_url,omitempty"`
 }

@@ -10,4 +10,5 @@ type Player struct {
 	Lat      float64 // 緯度 (Latitude)
 	Lng      float64 // 経度 (Longitude)
 	Color    string
+	PhotoURL string  // Supabase Storageの画像URLを保存するポケット
 }

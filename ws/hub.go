@@ -30,6 +30,7 @@ type Client struct {
 	Lat      float64
 	Lng      float64
 	Color    string
+	PhotoURL string
 	mu       sync.Mutex
 }
 
@@ -352,6 +353,7 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 			client.Lat = player.Lat
 			client.Lng = player.Lng
 			client.Color = player.Color
+			client.PhotoURL = player.PhotoURL 
 			client.mu.Unlock()
 
 			GameHub.Register(roomID, client)
@@ -598,6 +600,7 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				_ = targetClient.Conn.WriteJSON(OutgoingMessage{
 					Event:        "capture_checking",
 					AttackerName: attackerName, // ← ここで上で作った変数を使う！
+					PhotoURL:     msg.PhotoURL, // ← ★追加：鬼から届いたURLをそのまま逃走者に渡す
 				})
 				targetClient.mu.Unlock()
 			} else {
