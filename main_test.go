@@ -148,6 +148,46 @@ func assertHTTPTestRoomSettings(t *testing.T, msg ws.OutgoingMessage, timeLimit,
 	}
 }
 
+func TestHealthzReturnsOK(t *testing.T) {
+	_, server, _, cleanup := newHTTPTestServer(t, models.Room{})
+	defer cleanup()
+
+	resp, err := http.Get(server.URL + "/healthz")
+	if err != nil {
+		t.Fatalf("GET /healthz failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		payload, _ := io.ReadAll(resp.Body)
+		t.Fatalf("GET /healthz status mismatch: status=%d body=%s", resp.StatusCode, payload)
+	}
+
+	var payload map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("GET /healthz JSON decode failed: %v", err)
+	}
+	if payload["status"] != "ok" {
+		t.Fatalf("GET /healthz payload mismatch: %+v", payload)
+	}
+}
+
+func TestServerAddrUsesPortEnv(t *testing.T) {
+	t.Setenv("PORT", "10000")
+
+	if got := serverAddr(); got != "0.0.0.0:10000" {
+		t.Fatalf("serverAddr() = %q, want %q", got, "0.0.0.0:10000")
+	}
+}
+
+func TestServerAddrDefaultsTo8080(t *testing.T) {
+	t.Setenv("PORT", "")
+
+	if got := serverAddr(); got != "0.0.0.0:8080" {
+		t.Fatalf("serverAddr() = %q, want %q", got, "0.0.0.0:8080")
+	}
+}
+
 func TestPutRoomSettingsBroadcastsAndSavesAreaCenter(t *testing.T) {
 	roomID := "putSettingsRoom"
 	db, server, wsBaseURL, cleanup := newHTTPTestServer(t, models.Room{

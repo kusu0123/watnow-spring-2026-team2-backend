@@ -27,7 +27,15 @@ WebSocket は以下です。
 ws://localhost:8080/ws/rooms/:room_id
 ```
 
+`PORT` 環境変数が設定されている場合は、そのポートで待ち受けます。Render では `PORT` が自動で渡されるため、追加設定なしで Render 側のポートに合わせて起動します。
+
 ## 基本的な動作確認
+
+ヘルスチェック:
+
+```sh
+curl http://localhost:8080/healthz
+```
 
 ルーム作成:
 
@@ -44,6 +52,19 @@ curl -X PUT http://localhost:8080/rooms/1234 \
 ```
 
 WebSocket の動作確認は、フロントエンドまたは WebSocket クライアントから `/ws/rooms/:room_id` に接続して行います。
+
+## Render Free のコールドスタート対策
+
+Render Free の Web Service は一定時間アクセスがないと停止するため、UptimeRobot から定期的に軽いヘルスチェックを送って起動状態を保ちます。
+
+UptimeRobot で以下の monitor を作成してください。
+
+- Monitor Type: `HTTP(s)`
+- URL: `https://<render-service>.onrender.com/healthz`
+- Monitoring Interval: `5 minutes`
+- Method: `GET`
+
+Render の実 URL は環境ごとに違うため、このリポジトリには書きません。UptimeRobot の設定画面にだけ実 URL を登録してください。
 
 ## テスト
 

@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"net/http"
+	"os"
 
 	"github.com/gin-gonic/gin"
 	"github.com/watnow/watnow-spring-2026-team2-backend/models"
@@ -33,7 +34,17 @@ func main() {
 	}
 	r := setupRouter(db)
 
-	r.Run(":8080")
+	if err := r.Run(serverAddr()); err != nil {
+		panic("サーバー起動失敗: " + err.Error())
+	}
+}
+
+func serverAddr() string {
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	return "0.0.0.0:" + port
 }
 
 type areaCenterInput struct {
@@ -52,6 +63,10 @@ type roomSettingsInput struct {
 
 func setupRouter(db *gorm.DB) *gin.Engine {
 	r := gin.Default()
+
+	r.GET("/healthz", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
 
 	r.GET("/ws/rooms/:id", func(c *gin.Context) {
 		ws.ServeWs(c, db)
