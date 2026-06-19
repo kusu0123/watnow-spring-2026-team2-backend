@@ -67,6 +67,9 @@ func setupRouter(db *gorm.DB) *gin.Engine {
 	r.GET("/healthz", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
+	r.HEAD("/healthz", func(c *gin.Context) {
+		c.Status(http.StatusOK)
+	})
 
 	r.GET("/ws/rooms/:id", func(c *gin.Context) {
 		ws.ServeWs(c, db)
