@@ -172,6 +172,21 @@ func TestHealthzReturnsOK(t *testing.T) {
 	}
 }
 
+func TestHealthzHeadReturnsOK(t *testing.T) {
+	_, server, _, cleanup := newHTTPTestServer(t, models.Room{})
+	defer cleanup()
+
+	resp, err := http.Head(server.URL + "/healthz")
+	if err != nil {
+		t.Fatalf("HEAD /healthz failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("HEAD /healthz status mismatch: status=%d", resp.StatusCode)
+	}
+}
+
 func TestServerAddrUsesPortEnv(t *testing.T) {
 	t.Setenv("PORT", "10000")
 
