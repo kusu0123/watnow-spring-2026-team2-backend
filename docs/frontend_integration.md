@@ -19,6 +19,25 @@ ws://localhost:8080/ws/rooms/:room_id
 
 ## HTTP API
 
+### ヘルスチェック
+
+```http
+GET /healthz
+```
+
+レスポンス例:
+
+```json
+{
+  "status": "ok"
+}
+```
+
+補足:
+
+- Render Free のコールドスタート対策として、UptimeRobot から定期的にこの endpoint を叩きます。
+- DB にはアクセスしない軽い確認用 endpoint です。
+
 ### ルーム作成
 
 ```http
