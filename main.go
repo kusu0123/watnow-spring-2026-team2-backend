@@ -61,6 +61,15 @@ type roomSettingsInput struct {
 	AreaCenter   *areaCenterInput `json:"area_center"`
 }
 
+func isAllowedInt(value int, allowedValues ...int) bool {
+	for _, allowed := range allowedValues {
+		if value == allowed {
+			return true
+		}
+	}
+	return false
+}
+
 func setupRouter(db *gorm.DB) *gin.Engine {
 	r := gin.Default()
 
@@ -112,20 +121,20 @@ func setupRouter(db *gorm.DB) *gin.Engine {
 		}
 
 		// 2. その後で、受け取ったデータの中身をチェックする
-		if input.TimeLimit < 1 || input.TimeLimit > 3600 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "制限時間は1〜3600の間で設定してください"})
+		if !isAllowedInt(input.TimeLimit, 600, 900, 1800) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "制限時間は10分、15分、30分から選んでください"})
 			return
 		}
-		if input.OniCount < 1 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "鬼の人数は1人以上にしてください"})
+		if input.OniCount < 1 || input.OniCount > 3 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "鬼の人数は1〜3人で設定してください"})
 			return
 		}
-		if input.SyncInterval < 1 || input.SyncInterval > 300 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "更新頻度は1〜300の間で設定してください"})
+		if !isAllowedInt(input.SyncInterval, 60, 180, 300) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "更新頻度は1分、3分、5分から選んでください"})
 			return
 		}
-		if input.GracePeriod < 0 || input.GracePeriod > 300 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "猶予時間は0〜300の間で設定してください"})
+		if !isAllowedInt(input.GracePeriod, 60, 120, 180) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "猶予時間は1分、2分、3分から選んでください"})
 			return
 		}
 		if len(input.AreaSize) > 50 {

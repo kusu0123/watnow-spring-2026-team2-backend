@@ -80,8 +80,8 @@ Content-Type: application/json
   "time_limit": 900,
   "oni_count": 1,
   "area_size": "school-yard",
-  "sync_interval": 3,
-  "grace_period": 30,
+  "sync_interval": 180,
+  "grace_period": 120,
   "area_center": {
     "lat": 34.0,
     "lng": 135.0
@@ -91,11 +91,11 @@ Content-Type: application/json
 
 バリデーション:
 
-- `time_limit`: 1 から 3600 秒
-- `oni_count`: 1 以上
+- `time_limit`: 600 / 900 / 1800 秒
+- `oni_count`: 1 から 3 人
 - `area_size`: 50 文字以下
-- `sync_interval`: 1 から 300 秒
-- `grace_period`: 0 から 300 秒
+- `sync_interval`: 60 / 180 / 300 秒
+- `grace_period`: 60 / 120 / 180 秒
 - `area_center`: 任意。指定する場合、`lat` は -90 から 90、`lng` は -180 から 180
 
 現在の実装では、設定更新時に `time_limit`, `oni_count`, `area_size`, `sync_interval`, `grace_period` をすべて送る前提です。一部項目だけを送ると、未指定の数値項目が `0` として扱われるため、フロント側ではフォームの全項目をまとめて送信してください。
@@ -120,6 +120,9 @@ Content-Type: application/json
 
 - `user_id` はフロント側で安定して保持します。
 - 同じ `room_id` と `user_id` で再接続すると、DB に保存された状態を使って復帰します。
+- 新規参加は待機中のみ許可されます。ゲーム中またはリザルト中の新規参加は `error` になります。
+- ゲーム中またはリザルト中でも、既存の `room_id + user_id` の復帰は許可されます。
+- 参加人数は最大 15 人です。
 - `name` は 1 文字以上 20 文字以下です。
 - `color` は `#` から始まる 7 文字の形式を送ってください。
 
@@ -146,7 +149,11 @@ Content-Type: application/json
 要点:
 
 - `oni_users` は鬼にする参加済み `user_id` の配列です。
-- `oni_users` が空、未指定、または未参加の `user_id` を含む場合は開始されず、送信元に `error` が届きます。
+- 開始には 2 人以上の参加者が必要です。
+- `oni_users` は 1 から 3 人で、重複はできません。
+- 全員を鬼にすることはできません。
+- `oni_count` と `oni_users` の人数は一致させてください。
+- `oni_users` が空、未指定、重複、未参加の `user_id` を含む場合は開始されず、送信元に `error` が届きます。
 - 鬼に指定されたプレイヤーの `color` はサーバー側で `black` に上書きされます。
 
 受信イベント:
@@ -240,6 +247,39 @@ Content-Type: application/json
   "target_id": "user-002"
 }
 ```
+
+### reset
+
+リザルト後に同じ room でもう一度遊ぶための action です。
+
+```json
+{
+  "action": "reset"
+}
+```
+
+要点:
+
+- `result` 後だけ実行できます。ゲーム中や待機中に送ると `error` になります。
+- 接続中の参加者だけを次ゲームの参加者として残します。
+- 役割と捕獲状態はリセットされ、全員が待機中の逃走者状態に戻ります。
+- 成功すると接続中クライアントへ `waiting` が届きます。
+
+### leave
+
+ホームへ戻る、または明示的に退出するときの action です。
+
+```json
+{
+  "action": "leave"
+}
+```
+
+要点:
+
+- 待機中とリザルト中の `leave` では、DB の player も削除されます。
+- ゲーム中の `leave` では、復帰できるよう DB の player は残し、接続中メモリからだけ外します。
+- WebSocket の通常切断とは別の明示退出として扱います。
 
 ## WebSocket: 受信 event
 

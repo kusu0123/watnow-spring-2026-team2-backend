@@ -20,19 +20,27 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
+const (
+	minStartPlayers = 2
+	maxRoomPlayers  = 15
+	minOniUsers     = 1
+	maxOniUsers     = 3
+)
+
 type Client struct {
-	Conn     *websocket.Conn
-	PlayerID string
-	UserID   string
-	RoomID   string
-	Name     string
-	Role     int
-	IsCaught bool
-	Lat      float64
-	Lng      float64
-	Color    string
-	PhotoURL string
-	mu       sync.Mutex
+	Conn           *websocket.Conn
+	PlayerID       string
+	UserID         string
+	RoomID         string
+	Name           string
+	Role           int
+	IsCaught       bool
+	Lat            float64
+	Lng            float64
+	Color          string
+	PhotoURL       string
+	LeftExplicitly bool
+	mu             sync.Mutex
 }
 
 type RoomState struct {
@@ -154,6 +162,143 @@ func (h *Hub) Register(roomID string, client *Client) {
 	room.mu.Unlock()
 }
 
+func (h *Hub) removeClientFromRoom(roomID string, client *Client) (*RoomState, int, bool) {
+	h.mu.RLock()
+	room, ok := h.Rooms[roomID]
+	h.mu.RUnlock()
+	if !ok {
+		return nil, 0, false
+	}
+
+	room.mu.Lock()
+	status := room.Status
+	delete(room.Clients, client)
+	isEmpty := len(room.Clients) == 0
+	room.mu.Unlock()
+
+	return room, status, isEmpty
+}
+
+func roomStatus(room *RoomState) int {
+	room.mu.RLock()
+	defer room.mu.RUnlock()
+	return room.Status
+}
+
+func roomPlayerCount(db *gorm.DB, roomID string) (int64, error) {
+	var count int64
+	if err := db.Model(&models.Player{}).Where("room_id = ?", roomID).Count(&count).Error; err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+func oniUsersForRoom(db *gorm.DB, roomID string) ([]string, error) {
+	var players []models.Player
+	if err := db.Where("room_id = ? AND role = ?", roomID, 1).Order("user_id ASC").Find(&players).Error; err != nil {
+		return nil, err
+	}
+
+	oniUsers := make([]string, 0, len(players))
+	for _, player := range players {
+		oniUsers = append(oniUsers, player.UserID)
+	}
+	return oniUsers, nil
+}
+
+func sendRoomSettingsToClient(roomID string, client *Client, room *RoomState, userID string) {
+	if err := sendToClient(client, room.roomSettingsMessage()); err != nil {
+		log.Printf("[Info] Room: %s | User: %s | room_settings送信に失敗しました: %v\n", roomID, userID, err)
+	}
+}
+
+func startGameLoopIfNeeded(roomID string, room *RoomState, db *gorm.DB) {
+	startLoop := false
+	room.mu.Lock()
+	if room.Status == 1 && !room.IsGMLoopActive {
+		room.IsGMLoopActive = true
+		startLoop = true
+	}
+	room.mu.Unlock()
+
+	if startLoop {
+		go runGameLoop(roomID, room, db)
+	}
+}
+
+func sendActiveStateToClient(roomID string, client *Client, room *RoomState, db *gorm.DB) {
+	oniUsers, err := oniUsersForRoom(db, roomID)
+	if err != nil {
+		log.Printf("[Error] Room: %s | 鬼一覧の取得に失敗しました: %v\n", roomID, err)
+		oniUsers = nil
+	}
+
+	client.mu.Lock()
+	role := client.Role
+	userID := client.UserID
+	client.mu.Unlock()
+
+	room.mu.RLock()
+	timeLimit := room.TimeLimit
+	isGameActive := room.IsGameActive
+	room.mu.RUnlock()
+
+	if err := sendToClient(client, OutgoingMessage{
+		Event:     "start",
+		Role:      &role,
+		TimeLimit: timeLimit,
+		OniUsers:  oniUsers,
+	}); err != nil {
+		log.Printf("[Info] Room: %s | User: %s | start再送に失敗しました: %v\n", roomID, userID, err)
+		return
+	}
+
+	if isGameActive {
+		if err := sendToClient(client, OutgoingMessage{Event: "game_active"}); err != nil {
+			log.Printf("[Info] Room: %s | User: %s | game_active再送に失敗しました: %v\n", roomID, userID, err)
+			return
+		}
+		if err := sendToClient(client, room.syncMessageFor(client)); err != nil {
+			log.Printf("[Info] Room: %s | User: %s | sync再送に失敗しました: %v\n", roomID, userID, err)
+		}
+	}
+}
+
+func resetRoomForReplay(roomID string, room *RoomState, db *gorm.DB) error {
+	clients := room.clientList()
+	connectedUserIDs := make([]string, 0, len(clients))
+	for _, client := range clients {
+		client.mu.Lock()
+		userID := client.UserID
+		client.mu.Unlock()
+		if userID != "" {
+			connectedUserIDs = append(connectedUserIDs, userID)
+		}
+	}
+
+	return db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&models.Room{}).Where("id = ?", roomID).Update("status", 0).Error; err != nil {
+			return err
+		}
+		if len(connectedUserIDs) > 0 {
+			if err := tx.Model(&models.Player{}).Where("room_id = ? AND user_id IN ?", roomID, connectedUserIDs).Updates(map[string]interface{}{
+				"role":      0,
+				"is_caught": false,
+			}).Error; err != nil {
+				return err
+			}
+			if err := tx.Where("room_id = ? AND user_id NOT IN ?", roomID, connectedUserIDs).Delete(&models.Player{}).Error; err != nil {
+				return err
+			}
+		} else {
+			if err := tx.Where("room_id = ?", roomID).Delete(&models.Player{}).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 func (h *Hub) Unregister(roomID string, client *Client, db *gorm.DB) {
 	h.mu.Lock()
 	room, ok := h.Rooms[roomID]
@@ -172,7 +317,16 @@ func (h *Hub) Unregister(roomID string, client *Client, db *gorm.DB) {
 	}
 	//部屋に誰もいなくなったかチェック
 	isEmpty := len(room.Clients) == 0
+	status := room.Status
 	room.mu.Unlock()
+
+	client.mu.Lock()
+	leftExplicitly := client.LeftExplicitly
+	client.mu.Unlock()
+
+	if leftExplicitly && status == 1 {
+		return
+	}
 
 	//誰もいなければ、Hub(メモリ)から部屋ごと削除する
 	if isEmpty {
@@ -311,9 +465,25 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				continue
 			}
 
+			status := roomStatus(room)
 			var player models.Player
 			err := db.Where("room_id = ? AND user_id = ?", roomID, msg.UserID).First(&player).Error
+			playerExists := err == nil
 			if errors.Is(err, gorm.ErrRecordNotFound) {
+				if status != 0 {
+					sendError(client, "ゲーム中または終了後の新規参加はできません")
+					continue
+				}
+				count, err := roomPlayerCount(db, roomID)
+				if err != nil {
+					sendError(client, "プレイヤー情報の取得に失敗しました")
+					continue
+				}
+				if count >= maxRoomPlayers {
+					sendError(client, "参加人数は15人までです")
+					continue
+				}
+
 				player = models.Player{
 					ID:     makePlayerID(roomID, msg.UserID),
 					RoomID: roomID,
@@ -328,7 +498,7 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 			} else if err != nil {
 				sendError(client, "プレイヤー情報の保存に失敗しました")
 				continue
-			} else {
+			} else if status == 0 {
 				updates := map[string]interface{}{}
 				if msg.Name != "" && msg.Name != player.Name {
 					player.Name = msg.Name
@@ -360,12 +530,31 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 
 			GameHub.Register(roomID, client)
 
-			room.Broadcast(OutgoingMessage{
-				Event:   "waiting",
-				Players: room.waitingPlayers(),
-			})
-			if err := sendToClient(client, room.roomSettingsMessage()); err != nil {
-				log.Printf("[Info] Room: %s | User: %s | room_settings送信に失敗しました: %v\n", roomID, player.UserID, err)
+			switch status {
+			case 0:
+				room.Broadcast(OutgoingMessage{
+					Event:   "waiting",
+					Players: room.waitingPlayers(),
+				})
+				sendRoomSettingsToClient(roomID, client, room, player.UserID)
+			case 1:
+				sendRoomSettingsToClient(roomID, client, room, player.UserID)
+				sendActiveStateToClient(roomID, client, room, db)
+				startGameLoopIfNeeded(roomID, room, db)
+			case 2:
+				sendRoomSettingsToClient(roomID, client, room, player.UserID)
+				resultMessage, err := room.resultMessage(roomID, db)
+				if err != nil {
+					log.Printf("[Error] Room: %s | リザルト再送に失敗しました: %v\n", roomID, err)
+					continue
+				}
+				if err := sendToClient(client, resultMessage); err != nil {
+					log.Printf("[Info] Room: %s | User: %s | result再送に失敗しました: %v\n", roomID, player.UserID, err)
+				}
+			default:
+				if playerExists {
+					sendRoomSettingsToClient(roomID, client, room, player.UserID)
+				}
 			}
 
 		case "start":
@@ -380,6 +569,11 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				sendError(client, "鬼に指定するユーザーを1人以上選択してください")
 				continue
 			}
+			if len(msg.OniUsers) > maxOniUsers {
+				room.mu.Unlock()
+				sendError(client, "鬼は1〜3人で指定してください")
+				continue
+			}
 
 			selectedOniUsers := append([]string(nil), msg.OniUsers...)
 			oniUsers := make(map[string]bool, len(msg.OniUsers))
@@ -389,6 +583,11 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				if userID == "" {
 					validStart = false
 					errorMessage = "鬼に指定されたユーザーIDが不正です"
+					break
+				}
+				if oniUsers[userID] {
+					validStart = false
+					errorMessage = "鬼に指定されたユーザーが重複しています"
 					break
 				}
 				oniUsers[userID] = true
@@ -407,12 +606,26 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				}
 				c.mu.Unlock()
 			}
+			playerCount := len(joinedUsers)
+			if playerCount < minStartPlayers {
+				room.mu.Unlock()
+				sendError(client, "ゲーム開始には2人以上必要です")
+				continue
+			}
 			for userID := range oniUsers {
 				if !joinedUsers[userID] {
 					validStart = false
 					errorMessage = "鬼に指定されたユーザーが参加していません"
 					break
 				}
+			}
+			if validStart && len(oniUsers) >= playerCount {
+				validStart = false
+				errorMessage = "全員を鬼にはできません"
+			}
+			if validStart && room.OniCount >= minOniUsers && room.OniCount <= maxOniUsers && len(oniUsers) != room.OniCount {
+				validStart = false
+				errorMessage = "設定された鬼の人数と一致しません"
 			}
 			if !validStart {
 				room.mu.Unlock()
@@ -528,6 +741,84 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 			room.mu.RUnlock()
 
 			go runGameLoop(roomID, room, db)
+
+		case "reset":
+			client.mu.Lock()
+			userID := client.UserID
+			client.mu.Unlock()
+			if userID == "" {
+				sendError(client, "先に入室してください")
+				continue
+			}
+			if roomStatus(room) != 2 {
+				sendError(client, "リセットはリザルト後に実行してください")
+				continue
+			}
+
+			if err := resetRoomForReplay(roomID, room, db); err != nil {
+				sendError(client, "ルームのリセットに失敗しました")
+				continue
+			}
+
+			room.mu.Lock()
+			room.Status = 0
+			room.IsGameActive = false
+			room.IsGMLoopActive = false
+			room.StartAt = time.Time{}
+			room.ActiveAt = time.Time{}
+			room.mu.Unlock()
+
+			for _, c := range room.clientList() {
+				c.mu.Lock()
+				c.Role = 0
+				c.IsCaught = false
+				c.mu.Unlock()
+			}
+
+			room.Broadcast(OutgoingMessage{
+				Event:   "waiting",
+				Players: room.waitingPlayers(),
+			})
+
+		case "leave":
+			client.mu.Lock()
+			userID := client.UserID
+			client.LeftExplicitly = true
+			client.mu.Unlock()
+
+			status := roomStatus(room)
+			if (status == 0 || status == 2) && userID != "" {
+				if err := db.Where("room_id = ? AND user_id = ?", roomID, userID).Delete(&models.Player{}).Error; err != nil {
+					client.mu.Lock()
+					client.LeftExplicitly = false
+					client.mu.Unlock()
+					sendError(client, "プレイヤー情報の削除に失敗しました")
+					continue
+				}
+			}
+
+			removedRoom, leaveStatus, _ := GameHub.removeClientFromRoom(roomID, client)
+			client.mu.Lock()
+			_ = client.Conn.Close()
+			client.mu.Unlock()
+
+			if removedRoom != nil {
+				switch leaveStatus {
+				case 0:
+					removedRoom.Broadcast(OutgoingMessage{
+						Event:   "waiting",
+						Players: removedRoom.waitingPlayers(),
+					})
+				case 2:
+					resultMessage, err := removedRoom.resultMessage(roomID, db)
+					if err != nil {
+						log.Printf("[Error] Room: %s | leave後のリザルト更新に失敗しました: %v\n", roomID, err)
+					} else {
+						removedRoom.Broadcast(resultMessage)
+					}
+				}
+			}
+			return
 
 		case "move":
 			if msg.Lat < -90 || msg.Lat > 90 || msg.Lng < -180 || msg.Lng > 180 {
