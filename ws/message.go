@@ -53,20 +53,23 @@ type AreaCenterVal struct {
 
 // 待機中プレイヤーのまとまり
 type WaitingPlayerVal struct {
-	UserID string `json:"user_id"`
-	Name   string `json:"name"`
-	Color  string `json:"color"`
+	UserID   string `json:"user_id"`
+	Name     string `json:"name"`
+	Color    string `json:"color"`
 	PhotoURL string `json:"photo_url,omitempty"`
 }
 
 // 位置情報のまとまり
 type LocationVal struct {
-	UserID   string  `json:"user_id"`
-	Lat      float64 `json:"lat"`
-	Lng      float64 `json:"lng"`
-	IsCaught bool    `json:"is_caught"`
-	Color    string  `json:"color"`
-	PhotoURL string  `json:"photo_url,omitempty"`
+	PlayerID string   `json:"player_id"`
+	UserID   string   `json:"user_id"`
+	Name     string   `json:"name"`
+	Role     int      `json:"role"`
+	IsCaught bool     `json:"is_caught"`
+	Lat      *float64 `json:"lat,omitempty"`
+	Lng      *float64 `json:"lng,omitempty"`
+	Color    string   `json:"color"`
+	PhotoURL string   `json:"photo_url,omitempty"`
 }
 
 // 結果発表用のまとまり
