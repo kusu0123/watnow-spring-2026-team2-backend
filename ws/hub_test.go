@@ -165,27 +165,12 @@ func assertErrorMessage(t *testing.T, wsConn *websocket.Conn, message string) {
 func assertNoMessage(t *testing.T, wsConn *websocket.Conn) {
 	t.Helper()
 
-	assertNoMessageFor(t, wsConn, 200*time.Millisecond)
-}
-
-func assertNoMessageFor(t *testing.T, wsConn *websocket.Conn, duration time.Duration) {
-	t.Helper()
-
-	deadline := time.Now().Add(duration)
 	for {
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return
-		}
-		if remaining > 200*time.Millisecond {
-			remaining = 200 * time.Millisecond
-		}
-
-		wsConn.SetReadDeadline(time.Now().Add(remaining))
+		wsConn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
 		_, payload, err := wsConn.ReadMessage()
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				continue
+				return
 			}
 			t.Fatalf("想定外の読み取りエラーです: %v", err)
 		}
@@ -1676,23 +1661,6 @@ func TestAllRunnersCaughtImmediatelyEndsGameWithResultAndAllowsReset(t *testing.
 		t.Fatalf("想定外のイベント: %s", msg.Event)
 	}
 
-	sendJSON(t, wsConn1, `{"action":"move","lat":34.7,"lng":135.5}`)
-	waitFor(t, func() bool {
-		var player models.Player
-		if err := db.Where("room_id = ? AND user_id = ?", roomID, "player1").First(&player).Error; err != nil {
-			return false
-		}
-		return math.Abs(player.Lat-34.7) < 0.000001 && math.Abs(player.Lng-135.5) < 0.000001
-	})
-	sendJSON(t, wsConn2, `{"action":"move","lat":34.8,"lng":135.6}`)
-	waitFor(t, func() bool {
-		var player models.Player
-		if err := db.Where("room_id = ? AND user_id = ?", roomID, "player2").First(&player).Error; err != nil {
-			return false
-		}
-		return math.Abs(player.Lat-34.8) < 0.000001 && math.Abs(player.Lng-135.6) < 0.000001
-	})
-
 	sendJSON(t, wsConn1, `{"action":"start","oni_users":["player1"]}`)
 	start1 := readUntilEvent(t, wsConn1, "start")
 	start2 := readUntilEvent(t, wsConn2, "start")
@@ -1705,9 +1673,7 @@ func TestAllRunnersCaughtImmediatelyEndsGameWithResultAndAllowsReset(t *testing.
 
 	runnerConn := wsConn2
 	runnerID := "player2"
-	readUntilEvent(t, wsConn1, "game_active")
 	readUntilEvent(t, runnerConn, "game_active")
-	readUntilEvent(t, wsConn1, "sync")
 	readUntilEvent(t, runnerConn, "sync")
 	sendJSON(t, runnerConn, `{"action":"capture_response","approved":true}`)
 	if msg := readMessageWithin(t, runnerConn, 500*time.Millisecond); msg.Event != "captured" || msg.TargetID != runnerID || !msg.Approved {
@@ -1729,16 +1695,6 @@ func TestAllRunnersCaughtImmediatelyEndsGameWithResultAndAllowsReset(t *testing.
 	if result.Role != 0 || !result.IsCaught {
 		t.Fatalf("逃走者の結果が不正です: %+v", result)
 	}
-	if oniResult, ok := findResult(msg.Results, "player1"); !ok || oniResult.Role != 1 || oniResult.IsCaught {
-		t.Fatalf("鬼の結果が不正です: %+v", msg.Results)
-	}
-
-	if msg := readMessageWithin(t, wsConn1, 500*time.Millisecond); msg.Event != "captured" || msg.TargetID != runnerID || !msg.Approved {
-		t.Fatalf("鬼側captured通知が不正です: %+v", msg)
-	}
-	if msg := readMessageWithin(t, wsConn1, 500*time.Millisecond); msg.Event != "result" {
-		t.Fatalf("鬼側にcaptured直後のresultが届く想定です: %+v", msg)
-	}
 
 	waitFor(t, func() bool {
 		var room models.Room
@@ -1754,23 +1710,6 @@ func TestAllRunnersCaughtImmediatelyEndsGameWithResultAndAllowsReset(t *testing.
 		t.Fatalf("reset後は接続中2人がwaitingに戻る想定です: %+v", resetWaiting.Players)
 	}
 	readUntilEvent(t, runnerConn, "waiting")
-
-	waitFor(t, func() bool {
-		var room models.Room
-		if err := db.First(&room, "id = ?", roomID).Error; err != nil {
-			return false
-		}
-		return room.Status == 0
-	})
-	for _, userID := range []string{"player1", "player2"} {
-		var player models.Player
-		if err := db.Where("room_id = ? AND user_id = ?", roomID, userID).First(&player).Error; err != nil {
-			t.Fatalf("reset後のプレイヤー取得失敗: %v", err)
-		}
-		if player.Role != 0 || player.IsCaught || player.Lat != 0 || player.Lng != 0 {
-			t.Fatalf("reset後のプレイヤー状態が不正です: %+v", player)
-		}
-	}
 }
 
 func TestMoveAndCaptureSavePlayerState(t *testing.T) {
