@@ -113,6 +113,18 @@ func joinHTTPTestClient(t *testing.T, wsConn *websocket.Conn, userID, name strin
 func putRoomSettings(t *testing.T, server *httptest.Server, roomID, body string) {
 	t.Helper()
 
+	resp := putRoomSettingsRaw(t, server, roomID, body)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		payload, _ := io.ReadAll(resp.Body)
+		t.Fatalf("PUTのステータスが不正です: status=%d body=%s", resp.StatusCode, payload)
+	}
+}
+
+func putRoomSettingsRaw(t *testing.T, server *httptest.Server, roomID, body string) *http.Response {
+	t.Helper()
+
 	req, err := http.NewRequest(http.MethodPut, server.URL+"/rooms/"+roomID, bytes.NewBufferString(body))
 	if err != nil {
 		t.Fatalf("リクエスト作成失敗: %v", err)
@@ -123,12 +135,7 @@ func putRoomSettings(t *testing.T, server *httptest.Server, roomID, body string)
 	if err != nil {
 		t.Fatalf("PUT失敗: %v", err)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		payload, _ := io.ReadAll(resp.Body)
-		t.Fatalf("PUTのステータスが不正です: status=%d body=%s", resp.StatusCode, payload)
-	}
+	return resp
 }
 
 func assertHTTPTestRoomSettings(t *testing.T, msg ws.OutgoingMessage, timeLimit, oniCount int, areaSize string, syncInterval, gracePeriod int, lat, lng float64) {
@@ -287,12 +294,12 @@ func TestPutRoomSettingsWithoutAreaCenterPreservesExistingCenter(t *testing.T) {
 		"time_limit": 600,
 		"oni_count": 2,
 		"area_size": "700m",
-		"sync_interval": 90,
+		"sync_interval": 60,
 		"grace_period": 60
 	}`)
 
 	settings := readHTTPTestUntilEvent(t, wsConn, "room_settings")
-	assertHTTPTestRoomSettings(t, settings, 600, 2, "700m", 90, 60, 34.0, 135.0)
+	assertHTTPTestRoomSettings(t, settings, 600, 2, "700m", 60, 60, 34.0, 135.0)
 
 	var savedRoom models.Room
 	if err := db.First(&savedRoom, "id = ?", roomID).Error; err != nil {
@@ -305,5 +312,56 @@ func TestPutRoomSettingsWithoutAreaCenterPreservesExistingCenter(t *testing.T) {
 	stateSettings := ws.GameHub.GetOrCreateRoom(roomID).RoomSettingsMessage()
 	if stateSettings.AreaCenter == nil || math.Abs(stateSettings.AreaCenter.Lat-34.0) > 0.000001 || math.Abs(stateSettings.AreaCenter.Lng-135.0) > 0.000001 {
 		t.Fatalf("RoomStateのarea_centerが保持されていません: %+v", stateSettings.AreaCenter)
+	}
+}
+
+func TestPutRoomSettingsRejectsInvalidStep3Values(t *testing.T) {
+	roomID := "invalidSettingsRoom"
+	_, server, _, cleanup := newHTTPTestServer(t, models.Room{
+		ID:           roomID,
+		Status:       0,
+		TimeLimit:    900,
+		OniCount:     1,
+		AreaSize:     "500m",
+		SyncInterval: 180,
+		GracePeriod:  120,
+	})
+	defer cleanup()
+
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "oniCountZero",
+			body: `{"time_limit":900,"oni_count":0,"area_size":"500m","sync_interval":180,"grace_period":120}`,
+		},
+		{
+			name: "oniCountFour",
+			body: `{"time_limit":900,"oni_count":4,"area_size":"500m","sync_interval":180,"grace_period":120}`,
+		},
+		{
+			name: "invalidTimeLimit",
+			body: `{"time_limit":300,"oni_count":1,"area_size":"500m","sync_interval":180,"grace_period":120}`,
+		},
+		{
+			name: "invalidSyncInterval",
+			body: `{"time_limit":900,"oni_count":1,"area_size":"500m","sync_interval":90,"grace_period":120}`,
+		},
+		{
+			name: "invalidGracePeriod",
+			body: `{"time_limit":900,"oni_count":1,"area_size":"500m","sync_interval":180,"grace_period":30}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := putRoomSettingsRaw(t, server, roomID, tt.body)
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusBadRequest {
+				payload, _ := io.ReadAll(resp.Body)
+				t.Fatalf("不正な設定が拒否されていません: status=%d body=%s", resp.StatusCode, payload)
+			}
+		})
 	}
 }
