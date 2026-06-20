@@ -189,7 +189,7 @@ Content-Type: application/json
 - `join` 後に送信します。
 - 緯度は -90 から 90、経度は -180 から 180 の範囲です。
 - `move` は高頻度送信を想定しており、送信のたびにはブロードキャストされません。
-- 他プレイヤーの位置は `sync` イベントで受け取ります。
+- 鬼は未捕獲逃走者の位置を `sync` イベントで受け取ります。
 
 ### capture_request
 
@@ -266,22 +266,32 @@ Content-Type: application/json
 
 ### sync
 
-ゲーム本編中、`sync_interval` ごとに届く位置同期イベントです。
+ゲーム本編中に届く位置同期イベントです。`game_active` の直後に初回 `sync` が届き、その後は `sync_interval` ごとに届きます。
 
 ```json
 {
   "event": "sync",
   "locations": [
     {
+      "player_id": "room-001:user-001",
       "user_id": "user-001",
+      "name": "はるき",
+      "role": 0,
+      "is_caught": false,
       "lat": 34.7,
       "lng": 135.5,
-      "is_caught": false,
       "color": "#00AAFF"
     }
   ]
 }
 ```
+
+`role` は `0` が逃走者、`1` が鬼です。`locations` の中身は受信者ごとに変わります。
+
+- 鬼には、未捕獲逃走者だけが `lat` / `lng` 付きで届きます。
+- 未捕獲逃走者には、自分の状態だけが `lat` / `lng` 付きで届きます。
+- 捕獲済み逃走者には、自分の状態だけが届き、`lat` / `lng` は省略されます。
+- 捕獲済み逃走者の位置は、他プレイヤー向けには送られません。
 
 ### result
 

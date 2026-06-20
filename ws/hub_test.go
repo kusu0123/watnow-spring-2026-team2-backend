@@ -213,6 +213,33 @@ func findLocation(locations []LocationVal, userID string) (LocationVal, bool) {
 	return LocationVal{}, false
 }
 
+func assertLocationMeta(t *testing.T, location LocationVal, roomID, userID, name string, role int, isCaught bool, color string) {
+	t.Helper()
+
+	if location.PlayerID != makePlayerID(roomID, userID) || location.UserID != userID || location.Name != name || location.Role != role || location.IsCaught != isCaught || location.Color != color {
+		t.Fatalf("syncのプレイヤー情報が不正です: %+v", location)
+	}
+}
+
+func assertLocationCoords(t *testing.T, location LocationVal, lat, lng float64) {
+	t.Helper()
+
+	if location.Lat == nil || location.Lng == nil {
+		t.Fatalf("syncの座標が省略されています: %+v", location)
+	}
+	if math.Abs(*location.Lat-lat) > 0.000001 || math.Abs(*location.Lng-lng) > 0.000001 {
+		t.Fatalf("syncの座標が不正です: %+v", location)
+	}
+}
+
+func assertLocationNoCoords(t *testing.T, location LocationVal) {
+	t.Helper()
+
+	if location.Lat != nil || location.Lng != nil {
+		t.Fatalf("syncの座標は省略される想定です: %+v", location)
+	}
+}
+
 func findWaitingPlayer(players []WaitingPlayerVal, userID string) (WaitingPlayerVal, bool) {
 	for _, player := range players {
 		if player.UserID == userID {
@@ -769,42 +796,160 @@ func TestGracePeriodUsesSecondsAndMoveKeepsWorking(t *testing.T) {
 	}
 }
 
-func TestSyncIntervalUsesSeconds(t *testing.T) {
-	roomID := "syncSecondsRoom"
-	_, baseURL, cleanup := newTestServer(t, models.Room{
+func TestViewerSpecificSyncPayloadAndImmediateFirstSync(t *testing.T) {
+	roomID := "viewerSyncRoom"
+	db, baseURL, cleanup := newTestServer(t, models.Room{
 		ID:           roomID,
 		Status:       0,
-		TimeLimit:    4,
+		TimeLimit:    120,
 		OniCount:     1,
-		SyncInterval: 1,
+		SyncInterval: 30,
 		GracePeriod:  0,
 	})
 	defer cleanup()
 
-	wsConn := connectToRoom(t, baseURL, roomID)
-	defer wsConn.Close()
+	oniConn := connectToRoom(t, baseURL, roomID)
+	defer oniConn.Close()
+	runnerConn := connectToRoom(t, baseURL, roomID)
+	defer runnerConn.Close()
+	otherRunnerConn := connectToRoom(t, baseURL, roomID)
+	defer otherRunnerConn.Close()
 
-	sendJSON(t, wsConn, `{"action":"join","user_id":"player1","name":"はるき","color":"#00AAFF"}`)
-	if msg := readMessage(t, wsConn); msg.Event != "waiting" {
+	sendJSON(t, oniConn, `{"action":"join","user_id":"player1","name":"はるき","color":"#00AAFF"}`)
+	if msg := readMessage(t, oniConn); msg.Event != "waiting" {
 		t.Fatalf("想定外のイベント: %s", msg.Event)
 	}
 
-	sendJSON(t, wsConn, `{"action":"move","lat":34.7,"lng":135.5}`)
-	sendJSON(t, wsConn, `{"action":"start","oni_users":["player1"]}`)
-	readUntilEvent(t, wsConn, "start")
-	readUntilEvent(t, wsConn, "game_active")
+	sendJSON(t, runnerConn, `{"action":"join","user_id":"player2","name":"みな","color":"#FF00AA"}`)
+	if msg := readMessage(t, oniConn); msg.Event != "waiting" {
+		t.Fatalf("想定外のイベント: %s", msg.Event)
+	}
+	if msg := readMessage(t, runnerConn); msg.Event != "waiting" {
+		t.Fatalf("想定外のイベント: %s", msg.Event)
+	}
 
-	msg := readUntilEvent(t, wsConn, "sync")
-	location, ok := findLocation(msg.Locations, "player1")
+	sendJSON(t, otherRunnerConn, `{"action":"join","user_id":"player3","name":"そうた","color":"#00CC66"}`)
+	if msg := readMessage(t, oniConn); msg.Event != "waiting" {
+		t.Fatalf("想定外のイベント: %s", msg.Event)
+	}
+	if msg := readMessage(t, runnerConn); msg.Event != "waiting" {
+		t.Fatalf("想定外のイベント: %s", msg.Event)
+	}
+	if msg := readMessage(t, otherRunnerConn); msg.Event != "waiting" {
+		t.Fatalf("想定外のイベント: %s", msg.Event)
+	}
+
+	sendJSON(t, oniConn, `{"action":"move","lat":34.7,"lng":135.5}`)
+	waitFor(t, func() bool {
+		var player models.Player
+		if err := db.Where("room_id = ? AND user_id = ?", roomID, "player1").First(&player).Error; err != nil {
+			return false
+		}
+		return math.Abs(player.Lat-34.7) < 0.000001 && math.Abs(player.Lng-135.5) < 0.000001
+	})
+	sendJSON(t, runnerConn, `{"action":"move","lat":34.8,"lng":135.6}`)
+	waitFor(t, func() bool {
+		var player models.Player
+		if err := db.Where("room_id = ? AND user_id = ?", roomID, "player2").First(&player).Error; err != nil {
+			return false
+		}
+		return math.Abs(player.Lat-34.8) < 0.000001 && math.Abs(player.Lng-135.6) < 0.000001
+	})
+	sendJSON(t, otherRunnerConn, `{"action":"move","lat":34.9,"lng":135.7}`)
+	waitFor(t, func() bool {
+		var player models.Player
+		if err := db.Where("room_id = ? AND user_id = ?", roomID, "player3").First(&player).Error; err != nil {
+			return false
+		}
+		return math.Abs(player.Lat-34.9) < 0.000001 && math.Abs(player.Lng-135.7) < 0.000001
+	})
+
+	sendJSON(t, oniConn, `{"action":"start","oni_users":["player1"]}`)
+	readUntilEvent(t, oniConn, "start")
+	readUntilEvent(t, runnerConn, "start")
+	readUntilEvent(t, otherRunnerConn, "start")
+
+	readUntilEvent(t, oniConn, "game_active")
+	readUntilEvent(t, runnerConn, "game_active")
+	readUntilEvent(t, otherRunnerConn, "game_active")
+
+	oniSync := readUntilEvent(t, oniConn, "sync")
+	if len(oniSync.Locations) != 2 {
+		t.Fatalf("鬼には未捕獲逃走者2人だけが届く想定です: %+v", oniSync.Locations)
+	}
+	if _, ok := findLocation(oniSync.Locations, "player1"); ok {
+		t.Fatalf("鬼向けsyncに鬼自身が含まれています: %+v", oniSync.Locations)
+	}
+	runnerLocation, ok := findLocation(oniSync.Locations, "player2")
 	if !ok {
-		t.Fatalf("syncにplayer1の位置情報が含まれていません: %+v", msg.Locations)
+		t.Fatalf("鬼向けsyncに未捕獲逃走者player2が含まれていません: %+v", oniSync.Locations)
 	}
-	if math.Abs(location.Lat-34.7) > 0.000001 || math.Abs(location.Lng-135.5) > 0.000001 {
-		t.Fatalf("syncの位置情報が不正です: %+v", location)
+	assertLocationMeta(t, runnerLocation, roomID, "player2", "みな", 0, false, "#FF00AA")
+	assertLocationCoords(t, runnerLocation, 34.8, 135.6)
+	otherRunnerLocation, ok := findLocation(oniSync.Locations, "player3")
+	if !ok {
+		t.Fatalf("鬼向けsyncに未捕獲逃走者player3が含まれていません: %+v", oniSync.Locations)
 	}
-	if location.Color != "black" {
-		t.Fatalf("syncのカラー情報が不正です: %+v", location)
+	assertLocationMeta(t, otherRunnerLocation, roomID, "player3", "そうた", 0, false, "#00CC66")
+	assertLocationCoords(t, otherRunnerLocation, 34.9, 135.7)
+
+	runnerSync := readUntilEvent(t, runnerConn, "sync")
+	if len(runnerSync.Locations) != 1 {
+		t.Fatalf("逃走者には自分の状態だけが届く想定です: %+v", runnerSync.Locations)
 	}
+	selfLocation, ok := findLocation(runnerSync.Locations, "player2")
+	if !ok {
+		t.Fatalf("逃走者向けsyncに自分の状態が含まれていません: %+v", runnerSync.Locations)
+	}
+	assertLocationMeta(t, selfLocation, roomID, "player2", "みな", 0, false, "#FF00AA")
+	assertLocationCoords(t, selfLocation, 34.8, 135.6)
+	if _, ok := findLocation(runnerSync.Locations, "player1"); ok {
+		t.Fatalf("逃走者向けsyncに他プレイヤーが含まれています: %+v", runnerSync.Locations)
+	}
+
+	sendJSON(t, runnerConn, `{"action":"capture_response","approved":true}`)
+	readUntilEvent(t, oniConn, "captured")
+	readUntilEvent(t, runnerConn, "captured")
+	readUntilEvent(t, otherRunnerConn, "captured")
+
+	room := GameHub.GetOrCreateRoom(roomID)
+	room.SendSyncToAll()
+
+	oniSyncAfterCapture := readUntilEvent(t, oniConn, "sync")
+	if len(oniSyncAfterCapture.Locations) != 1 {
+		t.Fatalf("捕獲後の鬼向けsyncは未捕獲逃走者1人だけの想定です: %+v", oniSyncAfterCapture.Locations)
+	}
+	if _, ok := findLocation(oniSyncAfterCapture.Locations, "player2"); ok {
+		t.Fatalf("捕獲済み逃走者が鬼向けsyncに含まれています: %+v", oniSyncAfterCapture.Locations)
+	}
+	remainingRunnerLocation, ok := findLocation(oniSyncAfterCapture.Locations, "player3")
+	if !ok {
+		t.Fatalf("未捕獲逃走者が鬼向けsyncに含まれていません: %+v", oniSyncAfterCapture.Locations)
+	}
+	assertLocationMeta(t, remainingRunnerLocation, roomID, "player3", "そうた", 0, false, "#00CC66")
+	assertLocationCoords(t, remainingRunnerLocation, 34.9, 135.7)
+
+	caughtRunnerSync := readUntilEvent(t, runnerConn, "sync")
+	if len(caughtRunnerSync.Locations) != 1 {
+		t.Fatalf("捕獲済み逃走者には自分の状態だけが届く想定です: %+v", caughtRunnerSync.Locations)
+	}
+	caughtSelfLocation, ok := findLocation(caughtRunnerSync.Locations, "player2")
+	if !ok {
+		t.Fatalf("捕獲済み逃走者向けsyncに自分の状態が含まれていません: %+v", caughtRunnerSync.Locations)
+	}
+	assertLocationMeta(t, caughtSelfLocation, roomID, "player2", "みな", 0, true, "#FF00AA")
+	assertLocationNoCoords(t, caughtSelfLocation)
+
+	otherRunnerSync := readUntilEvent(t, otherRunnerConn, "sync")
+	if len(otherRunnerSync.Locations) != 1 {
+		t.Fatalf("未捕獲逃走者には自分の状態だけが届く想定です: %+v", otherRunnerSync.Locations)
+	}
+	otherSelfLocation, ok := findLocation(otherRunnerSync.Locations, "player3")
+	if !ok {
+		t.Fatalf("未捕獲逃走者向けsyncに自分の状態が含まれていません: %+v", otherRunnerSync.Locations)
+	}
+	assertLocationMeta(t, otherSelfLocation, roomID, "player3", "そうた", 0, false, "#00CC66")
+	assertLocationCoords(t, otherSelfLocation, 34.9, 135.7)
 }
 
 func TestInvalidJSONReturnsErrorToSender(t *testing.T) {

@@ -22,6 +22,7 @@ var upgrader = websocket.Upgrader{
 
 type Client struct {
 	Conn     *websocket.Conn
+	PlayerID string
 	UserID   string
 	RoomID   string
 	Name     string
@@ -346,6 +347,7 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 			}
 
 			client.mu.Lock()
+			client.PlayerID = player.ID
 			client.UserID = player.UserID
 			client.Name = player.Name
 			client.Role = player.Role
@@ -353,7 +355,7 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 			client.Lat = player.Lat
 			client.Lng = player.Lng
 			client.Color = player.Color
-			client.PhotoURL = player.PhotoURL 
+			client.PhotoURL = player.PhotoURL
 			client.mu.Unlock()
 
 			GameHub.Register(roomID, client)

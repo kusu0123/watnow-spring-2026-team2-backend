@@ -96,6 +96,40 @@ func (room *RoomState) clientList() []*Client {
 	return clients
 }
 
+type syncPlayerSnapshot struct {
+	PlayerID string
+	UserID   string
+	Name     string
+	Role     int
+	IsCaught bool
+	Lat      float64
+	Lng      float64
+	Color    string
+	PhotoURL string
+}
+
+func snapshotClient(client *Client) syncPlayerSnapshot {
+	client.mu.Lock()
+	defer client.mu.Unlock()
+
+	playerID := client.PlayerID
+	if playerID == "" && client.RoomID != "" && client.UserID != "" {
+		playerID = makePlayerID(client.RoomID, client.UserID)
+	}
+
+	return syncPlayerSnapshot{
+		PlayerID: playerID,
+		UserID:   client.UserID,
+		Name:     client.Name,
+		Role:     client.Role,
+		IsCaught: client.IsCaught,
+		Lat:      client.Lat,
+		Lng:      client.Lng,
+		Color:    client.Color,
+		PhotoURL: client.PhotoURL,
+	}
+}
+
 func (room *RoomState) waitingPlayers() []WaitingPlayerVal {
 	clients := room.clientList()
 	players := make([]WaitingPlayerVal, 0, len(clients))
@@ -103,9 +137,9 @@ func (room *RoomState) waitingPlayers() []WaitingPlayerVal {
 	for _, client := range clients {
 		client.mu.Lock()
 		player := WaitingPlayerVal{
-			UserID: client.UserID,
-			Name:   client.Name,
-			Color:  client.Color,
+			UserID:   client.UserID,
+			Name:     client.Name,
+			Color:    client.Color,
 			PhotoURL: client.PhotoURL,
 		}
 		client.mu.Unlock()
@@ -122,28 +156,67 @@ func (room *RoomState) waitingPlayers() []WaitingPlayerVal {
 	return players
 }
 
-func (room *RoomState) locations() []LocationVal {
+func locationForSnapshot(player syncPlayerSnapshot, includeCoords bool) LocationVal {
+	location := LocationVal{
+		PlayerID: player.PlayerID,
+		UserID:   player.UserID,
+		Name:     player.Name,
+		Role:     player.Role,
+		IsCaught: player.IsCaught,
+		Color:    player.Color,
+		PhotoURL: player.PhotoURL,
+	}
+	if includeCoords {
+		lat := player.Lat
+		lng := player.Lng
+		location.Lat = &lat
+		location.Lng = &lng
+	}
+	return location
+}
+
+func (room *RoomState) syncMessageFor(viewer *Client) OutgoingMessage {
+	viewerState := snapshotClient(viewer)
 	clients := room.clientList()
 	locations := make([]LocationVal, 0, len(clients))
 
 	for _, client := range clients {
-		client.mu.Lock()
-		locations = append(locations, LocationVal{
-			UserID:   client.UserID,
-			Lat:      client.Lat,
-			Lng:      client.Lng,
-			IsCaught: client.IsCaught,
-			Color:    client.Color,
-			PhotoURL: client.PhotoURL,
-		})
-		client.mu.Unlock()
+		player := snapshotClient(client)
+		if player.UserID == "" {
+			continue
+		}
+
+		switch {
+		case viewerState.Role == 1:
+			if player.Role == 0 && !player.IsCaught {
+				locations = append(locations, locationForSnapshot(player, true))
+			}
+		case player.UserID == viewerState.UserID:
+			locations = append(locations, locationForSnapshot(player, !player.IsCaught))
+		}
 	}
 
 	sort.Slice(locations, func(i, j int) bool {
 		return locations[i].UserID < locations[j].UserID
 	})
 
-	return locations
+	return OutgoingMessage{
+		Event:     "sync",
+		Locations: locations,
+	}
+}
+
+func (room *RoomState) SendSyncToAll() {
+	clients := room.clientList()
+
+	for _, client := range clients {
+		if err := sendToClient(client, room.syncMessageFor(client)); err != nil {
+			client.mu.Lock()
+			userID := client.UserID
+			client.mu.Unlock()
+			log.Printf("[Info] ユーザー %s へのsync送信に失敗しました\n", userID)
+		}
+	}
 }
 
 func (room *RoomState) resultMessage(roomID string, db *gorm.DB) (OutgoingMessage, error) {
@@ -281,6 +354,7 @@ func runGameLoop(roomID string, room *RoomState, db *gorm.DB) {
 
 			nextSyncAt = activeAt.Add(time.Duration(syncInterval) * time.Second)
 			room.Broadcast(OutgoingMessage{Event: "game_active"})
+			room.SendSyncToAll()
 		}
 
 		if isGameActive {
@@ -293,10 +367,7 @@ func runGameLoop(roomID string, room *RoomState, db *gorm.DB) {
 				nextSyncAt = activeAt.Add(time.Duration(syncInterval) * time.Second)
 			}
 			if !now.Before(nextSyncAt) {
-				room.Broadcast(OutgoingMessage{
-					Event:     "sync",
-					Locations: room.locations(),
-				})
+				room.SendSyncToAll()
 				for !now.Before(nextSyncAt) {
 					nextSyncAt = nextSyncAt.Add(time.Duration(syncInterval) * time.Second)
 				}
