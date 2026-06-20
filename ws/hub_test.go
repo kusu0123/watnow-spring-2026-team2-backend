@@ -77,7 +77,13 @@ func sendJSON(t *testing.T, wsConn *websocket.Conn, body string) {
 func readRawMessage(t *testing.T, wsConn *websocket.Conn) OutgoingMessage {
 	t.Helper()
 
-	wsConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	return readRawMessageWithin(t, wsConn, 2*time.Second)
+}
+
+func readRawMessageWithin(t *testing.T, wsConn *websocket.Conn, timeout time.Duration) OutgoingMessage {
+	t.Helper()
+
+	wsConn.SetReadDeadline(time.Now().Add(timeout))
 	_, payload, err := wsConn.ReadMessage()
 	if err != nil {
 		t.Fatalf("受信失敗: %v", err)
@@ -89,6 +95,20 @@ func readRawMessage(t *testing.T, wsConn *websocket.Conn) OutgoingMessage {
 	}
 
 	return msg
+}
+
+func readMessageWithin(t *testing.T, wsConn *websocket.Conn, timeout time.Duration) OutgoingMessage {
+	t.Helper()
+
+	for i := 0; i < 8; i++ {
+		msg := readRawMessageWithin(t, wsConn, timeout)
+		if msg.Event != "room_settings" {
+			return msg
+		}
+	}
+
+	t.Fatal("room_settings以外のイベントを受信できませんでした")
+	return OutgoingMessage{}
 }
 
 func readMessage(t *testing.T, wsConn *websocket.Conn) OutgoingMessage {
@@ -145,12 +165,27 @@ func assertErrorMessage(t *testing.T, wsConn *websocket.Conn, message string) {
 func assertNoMessage(t *testing.T, wsConn *websocket.Conn) {
 	t.Helper()
 
+	assertNoMessageFor(t, wsConn, 200*time.Millisecond)
+}
+
+func assertNoMessageFor(t *testing.T, wsConn *websocket.Conn, duration time.Duration) {
+	t.Helper()
+
+	deadline := time.Now().Add(duration)
 	for {
-		wsConn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return
+		}
+		if remaining > 200*time.Millisecond {
+			remaining = 200 * time.Millisecond
+		}
+
+		wsConn.SetReadDeadline(time.Now().Add(remaining))
 		_, payload, err := wsConn.ReadMessage()
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				return
+				continue
 			}
 			t.Fatalf("想定外の読み取りエラーです: %v", err)
 		}
@@ -1513,7 +1548,7 @@ func TestTimeLimitEndsGameWithResult(t *testing.T) {
 	readUntilEvent(t, wsConn, "game_active")
 
 	msg := readUntilEvent(t, wsConn, "result")
-	if len(msg.Survivors) != 1 || msg.Survivors[0] != "みな" {
+	if len(msg.Survivors) != 1 || msg.Survivors[0] != "player2" {
 		t.Fatalf("時間切れ後の生存逃走者が不正です: %+v", msg.Survivors)
 	}
 
@@ -1598,7 +1633,7 @@ func TestTimeLimitResultIncludesDisconnectedPlayersFromDB(t *testing.T) {
 	if result.Name != "みな" || result.Role != 0 || result.IsCaught {
 		t.Fatalf("切断済みプレイヤーの結果が不正です: %+v", result)
 	}
-	if len(msg.Survivors) != 1 || msg.Survivors[0] != "みな" {
+	if len(msg.Survivors) != 1 || msg.Survivors[0] != "player2" {
 		t.Fatalf("切断済み逃走者がsurvivorsに含まれていません: %+v", msg.Survivors)
 	}
 
@@ -1611,14 +1646,14 @@ func TestTimeLimitResultIncludesDisconnectedPlayersFromDB(t *testing.T) {
 	})
 }
 
-func TestAllRunnersCaughtEndsGameWithResult(t *testing.T) {
+func TestAllRunnersCaughtImmediatelyEndsGameWithResultAndAllowsReset(t *testing.T) {
 	roomID := "allCaughtRoom"
 	db, baseURL, cleanup := newTestServer(t, models.Room{
 		ID:           roomID,
 		Status:       0,
 		TimeLimit:    20,
 		OniCount:     1,
-		SyncInterval: 1,
+		SyncInterval: 30,
 		GracePeriod:  0,
 	})
 	defer cleanup()
@@ -1641,6 +1676,23 @@ func TestAllRunnersCaughtEndsGameWithResult(t *testing.T) {
 		t.Fatalf("想定外のイベント: %s", msg.Event)
 	}
 
+	sendJSON(t, wsConn1, `{"action":"move","lat":34.7,"lng":135.5}`)
+	waitFor(t, func() bool {
+		var player models.Player
+		if err := db.Where("room_id = ? AND user_id = ?", roomID, "player1").First(&player).Error; err != nil {
+			return false
+		}
+		return math.Abs(player.Lat-34.7) < 0.000001 && math.Abs(player.Lng-135.5) < 0.000001
+	})
+	sendJSON(t, wsConn2, `{"action":"move","lat":34.8,"lng":135.6}`)
+	waitFor(t, func() bool {
+		var player models.Player
+		if err := db.Where("room_id = ? AND user_id = ?", roomID, "player2").First(&player).Error; err != nil {
+			return false
+		}
+		return math.Abs(player.Lat-34.8) < 0.000001 && math.Abs(player.Lng-135.6) < 0.000001
+	})
+
 	sendJSON(t, wsConn1, `{"action":"start","oni_users":["player1"]}`)
 	start1 := readUntilEvent(t, wsConn1, "start")
 	start2 := readUntilEvent(t, wsConn2, "start")
@@ -1653,11 +1705,19 @@ func TestAllRunnersCaughtEndsGameWithResult(t *testing.T) {
 
 	runnerConn := wsConn2
 	runnerID := "player2"
+	readUntilEvent(t, wsConn1, "game_active")
 	readUntilEvent(t, runnerConn, "game_active")
+	readUntilEvent(t, wsConn1, "sync")
+	readUntilEvent(t, runnerConn, "sync")
 	sendJSON(t, runnerConn, `{"action":"capture_response","approved":true}`)
-	readUntilEvent(t, runnerConn, "captured")
+	if msg := readMessageWithin(t, runnerConn, 500*time.Millisecond); msg.Event != "captured" || msg.TargetID != runnerID || !msg.Approved {
+		t.Fatalf("captured通知が不正です: %+v", msg)
+	}
 
-	msg := readUntilEvent(t, runnerConn, "result")
+	msg := readMessageWithin(t, runnerConn, 500*time.Millisecond)
+	if msg.Event != "result" {
+		t.Fatalf("captured直後にresultが届く想定です: %+v", msg)
+	}
 	if len(msg.Survivors) != 0 {
 		t.Fatalf("全員確保後に生存逃走者が含まれています: %+v", msg.Survivors)
 	}
@@ -1669,6 +1729,16 @@ func TestAllRunnersCaughtEndsGameWithResult(t *testing.T) {
 	if result.Role != 0 || !result.IsCaught {
 		t.Fatalf("逃走者の結果が不正です: %+v", result)
 	}
+	if oniResult, ok := findResult(msg.Results, "player1"); !ok || oniResult.Role != 1 || oniResult.IsCaught {
+		t.Fatalf("鬼の結果が不正です: %+v", msg.Results)
+	}
+
+	if msg := readMessageWithin(t, wsConn1, 500*time.Millisecond); msg.Event != "captured" || msg.TargetID != runnerID || !msg.Approved {
+		t.Fatalf("鬼側captured通知が不正です: %+v", msg)
+	}
+	if msg := readMessageWithin(t, wsConn1, 500*time.Millisecond); msg.Event != "result" {
+		t.Fatalf("鬼側にcaptured直後のresultが届く想定です: %+v", msg)
+	}
 
 	waitFor(t, func() bool {
 		var room models.Room
@@ -1677,6 +1747,30 @@ func TestAllRunnersCaughtEndsGameWithResult(t *testing.T) {
 		}
 		return room.Status == 2
 	})
+
+	sendJSON(t, wsConn1, `{"action":"reset"}`)
+	resetWaiting := readUntilEvent(t, wsConn1, "waiting")
+	if len(resetWaiting.Players) != 2 {
+		t.Fatalf("reset後は接続中2人がwaitingに戻る想定です: %+v", resetWaiting.Players)
+	}
+	readUntilEvent(t, runnerConn, "waiting")
+
+	waitFor(t, func() bool {
+		var room models.Room
+		if err := db.First(&room, "id = ?", roomID).Error; err != nil {
+			return false
+		}
+		return room.Status == 0
+	})
+	for _, userID := range []string{"player1", "player2"} {
+		var player models.Player
+		if err := db.Where("room_id = ? AND user_id = ?", roomID, userID).First(&player).Error; err != nil {
+			t.Fatalf("reset後のプレイヤー取得失敗: %v", err)
+		}
+		if player.Role != 0 || player.IsCaught || player.Lat != 0 || player.Lng != 0 {
+			t.Fatalf("reset後のプレイヤー状態が不正です: %+v", player)
+		}
+	}
 }
 
 func TestMoveAndCaptureSavePlayerState(t *testing.T) {
