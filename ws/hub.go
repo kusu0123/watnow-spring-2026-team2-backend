@@ -58,6 +58,7 @@ type RoomState struct {
 	IsGameActive   bool
 	Clients        map[*Client]bool
 	IsGMLoopActive bool // 追加：GMの重複起動防止
+	LoopID         uint64
 	mu             sync.RWMutex
 }
 
@@ -214,15 +215,18 @@ func sendRoomSettingsToClient(roomID string, client *Client, room *RoomState, us
 
 func startGameLoopIfNeeded(roomID string, room *RoomState, db *gorm.DB) {
 	startLoop := false
+	var loopID uint64
 	room.mu.Lock()
 	if room.Status == 1 && !room.IsGMLoopActive {
+		room.LoopID++
+		loopID = room.LoopID
 		room.IsGMLoopActive = true
 		startLoop = true
 	}
 	room.mu.Unlock()
 
 	if startLoop {
-		go runGameLoop(roomID, room, db)
+		go runGameLoop(roomID, room, db, loopID)
 	}
 }
 
@@ -284,6 +288,8 @@ func resetRoomForReplay(roomID string, room *RoomState, db *gorm.DB) error {
 			if err := tx.Model(&models.Player{}).Where("room_id = ? AND user_id IN ?", roomID, connectedUserIDs).Updates(map[string]interface{}{
 				"role":      0,
 				"is_caught": false,
+				"lat":       0,
+				"lng":       0,
 			}).Error; err != nil {
 				return err
 			}
@@ -340,6 +346,7 @@ func (h *Hub) Unregister(roomID string, client *Client, db *gorm.DB) {
 				r.Status = 2
 				r.IsGameActive = false
 				r.IsGMLoopActive = false
+				r.LoopID++
 			}
 			r.mu.Unlock()
 
@@ -639,6 +646,8 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 			room.IsGameActive = false
 			room.StartAt = time.Now().Add(time.Duration(room.GracePeriod) * time.Second)
 			room.ActiveAt = time.Time{}
+			room.LoopID++
+			loopID := room.LoopID
 
 			type playerStartState struct {
 				Client        *Client
@@ -681,6 +690,7 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 					room.IsGameActive = false
 					room.StartAt = time.Time{}
 					room.ActiveAt = time.Time{}
+					room.LoopID++
 				}
 				for _, state := range playerStates {
 					state.Client.mu.Lock()
@@ -740,7 +750,7 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 			}
 			room.mu.RUnlock()
 
-			go runGameLoop(roomID, room, db)
+			go runGameLoop(roomID, room, db, loopID)
 
 		case "reset":
 			client.mu.Lock()
@@ -766,12 +776,15 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 			room.IsGMLoopActive = false
 			room.StartAt = time.Time{}
 			room.ActiveAt = time.Time{}
+			room.LoopID++
 			room.mu.Unlock()
 
 			for _, c := range room.clientList() {
 				c.mu.Lock()
 				c.Role = 0
 				c.IsCaught = false
+				c.Lat = 0
+				c.Lng = 0
 				c.mu.Unlock()
 			}
 
@@ -922,6 +935,17 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 					TargetID: targetID,
 					Approved: true,
 				})
+
+				if roomStatus(room) == 1 {
+					allCaught, err := allRunnersCaughtInDB(db, roomID)
+					if err != nil {
+						log.Printf("[Error] Room: %s | 捕獲後の終了判定に失敗しました: %v\n", roomID, err)
+						allCaught = room.allConnectedRunnersCaught()
+					}
+					if allCaught {
+						room.finish(roomID, db)
+					}
+				}
 			} else {
 				// 4歩目（拒否時）：不成立だったことを全員（または鬼）に通知
 				client.mu.Lock()

@@ -239,6 +239,8 @@ Content-Type: application/json
 }
 ```
 
+承認によって逃走者が全員捕まった場合は、`captured` の直後に `result` が届きます。
+
 拒否時:
 
 ```json
@@ -262,7 +264,7 @@ Content-Type: application/json
 
 - `result` 後だけ実行できます。ゲーム中や待機中に送ると `error` になります。
 - 接続中の参加者だけを次ゲームの参加者として残します。
-- 役割と捕獲状態はリセットされ、全員が待機中の逃走者状態に戻ります。
+- 役割、捕獲状態、位置情報はリセットされ、全員が待機中の逃走者状態に戻ります。
 - 成功すると接続中クライアントへ `waiting` が届きます。
 
 ### leave
@@ -340,7 +342,7 @@ Content-Type: application/json
 ```json
 {
   "event": "result",
-  "survivors": ["みな"],
+  "survivors": ["user-002"],
   "results": [
     {
       "user_id": "user-001",
@@ -351,6 +353,8 @@ Content-Type: application/json
   ]
 }
 ```
+
+`survivors` には最後まで捕まらなかった逃走者の `user_id` が入ります。全員捕獲時は空配列です。`results` には逃走者と鬼の両方が含まれます。
 
 ### error
 

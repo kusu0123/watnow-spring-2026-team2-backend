@@ -73,7 +73,7 @@
 - 制限時間が終了した
 - 逃走者が存在し、かつ逃走者全員の `is_caught` が `true` になった
 
-終了時は `result` が配信されます。`result.survivors` には最後まで捕まらなかった逃走者の名前、`result.results` には各プレイヤーの最終状態が入ります。
+終了時は `result` が配信されます。全員捕獲で終了した場合は、最後の `captured` の直後に `result` が配信されます。`result.survivors` には最後まで捕まらなかった逃走者の `user_id`、`result.results` には鬼を含む各プレイヤーの最終状態が入ります。
 
 ## 再接続
 

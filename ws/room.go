@@ -225,6 +225,10 @@ func (room *RoomState) resultMessage(roomID string, db *gorm.DB) (OutgoingMessag
 		return OutgoingMessage{}, err
 	}
 
+	return resultMessageFromPlayers(players), nil
+}
+
+func resultMessageFromPlayers(players []models.Player) OutgoingMessage {
 	results := make([]ResultVal, 0, len(players))
 	var survivors []string
 
@@ -238,7 +242,7 @@ func (room *RoomState) resultMessage(roomID string, db *gorm.DB) (OutgoingMessag
 		}
 
 		if result.Role == 0 && !result.IsCaught {
-			survivors = append(survivors, result.Name)
+			survivors = append(survivors, result.UserID)
 		}
 		results = append(results, result)
 	}
@@ -249,27 +253,62 @@ func (room *RoomState) resultMessage(roomID string, db *gorm.DB) (OutgoingMessag
 		Event:     "result",
 		Survivors: survivors,
 		Results:   results,
-	}, nil
+	}
 }
 
-func (room *RoomState) shouldEnd(now time.Time) bool {
-	room.mu.RLock()
-	if room.Status != 1 || !room.IsGameActive {
-		room.mu.RUnlock()
-		return false
+func (room *RoomState) resultMessageFromClients() OutgoingMessage {
+	clients := room.clientList()
+	players := make([]models.Player, 0, len(clients))
+	for _, client := range clients {
+		snapshot := snapshotClient(client)
+		if snapshot.UserID == "" {
+			continue
+		}
+		players = append(players, models.Player{
+			ID:       snapshot.PlayerID,
+			UserID:   snapshot.UserID,
+			Name:     snapshot.Name,
+			Role:     snapshot.Role,
+			IsCaught: snapshot.IsCaught,
+			PhotoURL: snapshot.PhotoURL,
+		})
 	}
 
-	if room.TimeLimit <= 0 || !now.Before(room.ActiveAt.Add(time.Duration(room.TimeLimit)*time.Second)) {
-		room.mu.RUnlock()
-		return true
+	sort.Slice(players, func(i, j int) bool {
+		return players[i].UserID < players[j].UserID
+	})
+
+	return resultMessageFromPlayers(players)
+}
+
+func (room *RoomState) resultMessageBestEffort(roomID string, db *gorm.DB) OutgoingMessage {
+	resultMessage, err := room.resultMessage(roomID, db)
+	if err != nil {
+		log.Printf("[Error] Room: %s | リザルト集計に失敗したため接続中プレイヤーから作成します: %v\n", roomID, err)
+		return room.resultMessageFromClients()
+	}
+	return resultMessage
+}
+
+func allRunnersCaughtInDB(db *gorm.DB, roomID string) (bool, error) {
+	var runnerCount int64
+	if err := db.Model(&models.Player{}).Where("room_id = ? AND role = ?", roomID, 0).Count(&runnerCount).Error; err != nil {
+		return false, err
+	}
+	if runnerCount == 0 {
+		return false, nil
 	}
 
-	clients := make([]*Client, 0, len(room.Clients))
-	for client := range room.Clients {
-		clients = append(clients, client)
+	var uncaughtCount int64
+	if err := db.Model(&models.Player{}).Where("room_id = ? AND role = ? AND is_caught = ?", roomID, 0, false).Count(&uncaughtCount).Error; err != nil {
+		return false, err
 	}
-	room.mu.RUnlock()
 
+	return uncaughtCount == 0, nil
+}
+
+func (room *RoomState) allConnectedRunnersCaught() bool {
+	clients := room.clientList()
 	hasRunner := false
 	allCaught := true
 	for _, client := range clients {
@@ -289,12 +328,29 @@ func (room *RoomState) shouldEnd(now time.Time) bool {
 	return hasRunner && allCaught
 }
 
-func (room *RoomState) finish(roomID string, db *gorm.DB) bool {
-	resultMessage, err := room.resultMessage(roomID, db)
-	if err != nil {
-		log.Printf("[Error] Room: %s | リザルト集計に失敗しました: %v\n", roomID, err)
+func (room *RoomState) shouldEnd(now time.Time, roomID string, db *gorm.DB) bool {
+	room.mu.RLock()
+	if room.Status != 1 || !room.IsGameActive {
+		room.mu.RUnlock()
 		return false
 	}
+
+	if room.TimeLimit <= 0 || !now.Before(room.ActiveAt.Add(time.Duration(room.TimeLimit)*time.Second)) {
+		room.mu.RUnlock()
+		return true
+	}
+	room.mu.RUnlock()
+
+	allCaught, err := allRunnersCaughtInDB(db, roomID)
+	if err != nil {
+		log.Printf("[Error] Room: %s | 終了判定に失敗しました: %v\n", roomID, err)
+		return room.allConnectedRunnersCaught()
+	}
+	return allCaught
+}
+
+func (room *RoomState) finish(roomID string, db *gorm.DB) bool {
+	resultMessage := room.resultMessageBestEffort(roomID, db)
 
 	room.mu.Lock()
 	if room.Status != 1 {
@@ -302,17 +358,26 @@ func (room *RoomState) finish(roomID string, db *gorm.DB) bool {
 		return false
 	}
 	room.Status = 2
+	room.IsGameActive = false
+	room.IsGMLoopActive = false
+	room.StartAt = time.Time{}
+	room.ActiveAt = time.Time{}
+	room.LoopID++
 	room.mu.Unlock()
 
-	_ = db.Model(&models.Room{}).Where("id = ?", roomID).Update("status", 2).Error
+	if err := db.Model(&models.Room{}).Where("id = ?", roomID).Update("status", 2).Error; err != nil {
+		log.Printf("[Error] Room: %s | 終了状態の保存に失敗しました: %v\n", roomID, err)
+	}
 	room.Broadcast(resultMessage)
 	return true
 }
 
-func runGameLoop(roomID string, room *RoomState, db *gorm.DB) {
+func runGameLoop(roomID string, room *RoomState, db *gorm.DB, loopID uint64) {
 	defer func() {
 		room.mu.Lock()
-		room.IsGMLoopActive = false
+		if room.LoopID == loopID {
+			room.IsGMLoopActive = false
+		}
 		room.mu.Unlock()
 	}()
 
@@ -326,6 +391,7 @@ func runGameLoop(roomID string, room *RoomState, db *gorm.DB) {
 
 		room.mu.RLock()
 		status := room.Status
+		currentLoopID := room.LoopID
 		hasClients := len(room.Clients) > 0
 		isGameActive := room.IsGameActive
 		startAt := room.StartAt
@@ -333,13 +399,13 @@ func runGameLoop(roomID string, room *RoomState, db *gorm.DB) {
 		activeAt := room.ActiveAt
 		room.mu.RUnlock()
 
-		if status != 1 || !hasClients {
+		if status != 1 || currentLoopID != loopID || !hasClients {
 			return
 		}
 
 		if !isGameActive && !now.Before(startAt) {
 			room.mu.Lock()
-			if room.Status != 1 || len(room.Clients) == 0 {
+			if room.Status != 1 || room.LoopID != loopID || len(room.Clients) == 0 {
 				room.mu.Unlock()
 				return
 			}
@@ -358,7 +424,7 @@ func runGameLoop(roomID string, room *RoomState, db *gorm.DB) {
 		}
 
 		if isGameActive {
-			if room.shouldEnd(now) {
+			if room.shouldEnd(now, roomID, db) {
 				room.finish(roomID, db)
 				return
 			}
