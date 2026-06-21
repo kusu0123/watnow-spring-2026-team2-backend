@@ -97,15 +97,16 @@ func (room *RoomState) clientList() []*Client {
 }
 
 type syncPlayerSnapshot struct {
-	PlayerID string
-	UserID   string
-	Name     string
-	Role     int
-	IsCaught bool
-	Lat      float64
-	Lng      float64
-	Color    string
-	PhotoURL string
+	PlayerID    string
+	UserID      string
+	Name        string
+	Role        int
+	IsCaught    bool
+	Lat         float64
+	Lng         float64
+	HasLocation bool
+	Color       string
+	PhotoURL    string
 }
 
 func snapshotClient(client *Client) syncPlayerSnapshot {
@@ -118,15 +119,16 @@ func snapshotClient(client *Client) syncPlayerSnapshot {
 	}
 
 	return syncPlayerSnapshot{
-		PlayerID: playerID,
-		UserID:   client.UserID,
-		Name:     client.Name,
-		Role:     client.Role,
-		IsCaught: client.IsCaught,
-		Lat:      client.Lat,
-		Lng:      client.Lng,
-		Color:    client.Color,
-		PhotoURL: client.PhotoURL,
+		PlayerID:    playerID,
+		UserID:      client.UserID,
+		Name:        client.Name,
+		Role:        client.Role,
+		IsCaught:    client.IsCaught,
+		Lat:         client.Lat,
+		Lng:         client.Lng,
+		HasLocation: client.HasLocation,
+		Color:       client.Color,
+		PhotoURL:    client.PhotoURL,
 	}
 }
 
@@ -166,7 +168,7 @@ func locationForSnapshot(player syncPlayerSnapshot, includeCoords bool) Location
 		Color:    player.Color,
 		PhotoURL: player.PhotoURL,
 	}
-	if includeCoords {
+	if includeCoords && player.HasLocation {
 		lat := player.Lat
 		lng := player.Lng
 		location.Lat = &lat
@@ -188,7 +190,7 @@ func (room *RoomState) syncMessageFor(viewer *Client) OutgoingMessage {
 
 		switch {
 		case viewerState.Role == 1:
-			if player.Role == 0 && !player.IsCaught {
+			if player.Role == 0 && !player.IsCaught && player.HasLocation {
 				locations = append(locations, locationForSnapshot(player, true))
 			}
 		case player.UserID == viewerState.UserID:
