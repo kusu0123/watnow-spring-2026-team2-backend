@@ -101,7 +101,38 @@ Content-Type: application/json
 現在の実装では、設定更新時に `time_limit`, `oni_count`, `area_size`, `sync_interval`, `grace_period` をすべて送る前提です。一部項目だけを送ると、未指定の数値項目が `0` として扱われるため、フロント側ではフォームの全項目をまとめて送信してください。
 `area_center` は任意項目です。未指定または `null` の場合、保存済みの中心地点は変更されません。
 
+### Step3 時点の人数・設定 validation
+
+| 項目 | 現行ルール |
+| --- | --- |
+| 最大参加人数 | 15 人 |
+| 最小開始人数 | 2 人 |
+| 鬼人数 | 1 から 3 人 |
+| `oni_count` | 1 から 3 |
+| 全員鬼 | 禁止 |
+| `oni_users` | 参加済み `user_id` のみ。空、重複、未参加者は `error` |
+
 ## WebSocket: 送信 action
+
+### Payload matrix
+
+| 種別 | 名前 | 方向 | Step3 状態 | 主な用途 |
+| --- | --- | --- | --- | --- |
+| action | `join` | frontend -> backend | 実装済み | 入室、再接続、待機中の名前・色更新 |
+| event | `waiting` | backend -> clients | 実装済み | 待機中参加者一覧 |
+| action | `start` | frontend -> backend | 実装済み | 役割指定とゲーム開始 |
+| event | `start` | backend -> clients | 実装済み | 各 viewer への役割通知 |
+| event | `game_active` | backend -> clients | 実装済み | 本編開始通知 |
+| action | `move` | frontend -> backend | 実装済み | 位置更新 |
+| event | `sync` | backend -> clients | 実装済み | viewer 別位置同期 |
+| action | `capture_request` | frontend -> backend | 簡易実装済み | Step4 以降で `request_id` と 30 秒 expire を追加予定 |
+| event | `capture_checking` | backend -> target runner | 簡易実装済み | 確保確認表示 |
+| action | `capture_response` | frontend -> backend | 簡易実装済み | Step4 以降で pending request との紐づけを追加予定 |
+| event | `captured` | backend -> clients | 簡易実装済み | 承認済み捕獲通知 |
+| event | `capture_denied` | backend -> clients | 簡易実装済み | 拒否通知。Step4 以降は送信先を申請鬼 + 対象逃走者へ絞る提案 |
+| action | `reset` | frontend -> backend | 実装済み | result 後の再戦 |
+| action | `leave` | frontend -> backend | 実装済み | 明示退出 |
+| event | `result` | backend -> clients | 実装済み | 現行は `survivors` / `results`。Step5/Step6 以降で `winner` などを拡張予定 |
 
 ### join
 
@@ -131,9 +162,18 @@ Content-Type: application/json
 ```json
 {
   "event": "waiting",
-  "players": ["はるき", "みな"]
+  "players": [
+    {
+      "user_id": "user-1",
+      "name": "player name",
+      "color": "#FF0000",
+      "photo_url": null
+    }
+  ]
 }
 ```
+
+`players` は Step3 後、文字列配列ではなく参加者 object の配列です。`photo_url` は backend 側の field として存在しますが、未設定時は省略または `null` として扱ってください。frontend 型との最終整合は Step4 以降で整理予定です。
 
 ### start
 
@@ -205,16 +245,20 @@ Content-Type: application/json
 ```json
 {
   "action": "capture_request",
-  "target_id": "user-002"
+  "target_id": "user-002",
+  "photo_url": "https://..."
 }
 ```
+
+Step3 時点の実装では `request_id` はまだありません。Step4 以降では `request_id` を backend 採番にして、申請と回答を紐づける方針です。
 
 対象の逃走者だけに以下が届きます。
 
 ```json
 {
   "event": "capture_checking",
-  "attacker_name": "はるき"
+  "attacker_name": "はるき",
+  "photo_url": "https://..."
 }
 ```
 
@@ -246,7 +290,8 @@ Content-Type: application/json
 ```json
 {
   "event": "capture_denied",
-  "target_id": "user-002"
+  "target_id": "user-002",
+  "approved": false
 }
 ```
 
@@ -266,6 +311,7 @@ Content-Type: application/json
 - 接続中の参加者だけを次ゲームの参加者として残します。
 - 役割、捕獲状態、位置情報はリセットされ、全員が待機中の逃走者状態に戻ります。
 - 成功すると接続中クライアントへ `waiting` が届きます。
+- result 後の再戦用です。
 
 ### leave
 
@@ -282,6 +328,7 @@ Content-Type: application/json
 - 待機中とリザルト中の `leave` では、DB の player も削除されます。
 - ゲーム中の `leave` では、復帰できるよう DB の player は残し、接続中メモリからだけ外します。
 - WebSocket の通常切断とは別の明示退出として扱います。
+- ホームへ戻るなど、ユーザーが明示的に退出したい場合に使います。
 
 ## WebSocket: 受信 event
 
@@ -315,14 +362,15 @@ Content-Type: application/json
   "event": "sync",
   "locations": [
     {
-      "player_id": "room-001:user-001",
-      "user_id": "user-001",
-      "name": "はるき",
+      "player_id": "room-id:user-id",
+      "user_id": "user-id",
+      "name": "player name",
       "role": 0,
       "is_caught": false,
-      "lat": 34.7,
-      "lng": 135.5,
-      "color": "#00AAFF"
+      "color": "#FF0000",
+      "lat": 34.0,
+      "lng": 135.0,
+      "photo_url": null
     }
   ]
 }
@@ -330,10 +378,13 @@ Content-Type: application/json
 
 `role` は `0` が逃走者、`1` が鬼です。`locations` の中身は受信者ごとに変わります。
 
+- `lat` / `lng` は表示対象にする場合のみ存在します。
 - 鬼には、未捕獲逃走者だけが `lat` / `lng` 付きで届きます。
-- 未捕獲逃走者には、自分の状態だけが `lat` / `lng` 付きで届きます。
+- 逃走者には基本的に他人の座標は届かず、自分の状態だけが届きます。
+- 未捕獲逃走者には、自分の状態が `lat` / `lng` 付きで届きます。
 - 捕獲済み逃走者には、自分の状態だけが届き、`lat` / `lng` は省略されます。
-- 捕獲済み逃走者の位置は、他プレイヤー向けには送られません。
+- 捕獲済み逃走者の座標は、他プレイヤー向けの表示対象にしません。
+- `photo_url` は backend 側にはありますが、frontend 型との整合は Step4 以降で整理予定です。未設定時は省略または `null` として扱ってください。
 
 ### result
 
@@ -348,7 +399,8 @@ Content-Type: application/json
       "user_id": "user-001",
       "name": "はるき",
       "role": 1,
-      "is_caught": false
+      "is_caught": false,
+      "photo_url": null
     }
   ]
 }
