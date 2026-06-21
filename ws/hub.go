@@ -37,6 +37,7 @@ type Client struct {
 	IsCaught       bool
 	Lat            float64
 	Lng            float64
+	HasLocation    bool
 	Color          string
 	PhotoURL       string
 	LeftExplicitly bool
@@ -286,10 +287,12 @@ func resetRoomForReplay(roomID string, room *RoomState, db *gorm.DB) error {
 		}
 		if len(connectedUserIDs) > 0 {
 			if err := tx.Model(&models.Player{}).Where("room_id = ? AND user_id IN ?", roomID, connectedUserIDs).Updates(map[string]interface{}{
-				"role":      0,
-				"is_caught": false,
-				"lat":       0,
-				"lng":       0,
+				"role":         0,
+				"is_caught":    false,
+				"lat":          0,
+				"lng":          0,
+				"has_location": false,
+				"color":        "",
 			}).Error; err != nil {
 				return err
 			}
@@ -328,7 +331,19 @@ func (h *Hub) Unregister(roomID string, client *Client, db *gorm.DB) {
 
 	client.mu.Lock()
 	leftExplicitly := client.LeftExplicitly
+	userID := client.UserID
 	client.mu.Unlock()
+
+	if !leftExplicitly && status == 0 && userID != "" && db != nil {
+		if err := db.Where("room_id = ? AND user_id = ?", roomID, userID).Delete(&models.Player{}).Error; err != nil {
+			log.Printf("[Error] Room: %s | User: %s | waiting切断後のプレイヤー削除に失敗しました: %v\n", roomID, userID, err)
+		} else if !isEmpty {
+			room.Broadcast(OutgoingMessage{
+				Event:   "waiting",
+				Players: room.waitingPlayers(),
+			})
+		}
+	}
 
 	if leftExplicitly && status == 1 {
 		return
@@ -531,6 +546,7 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 			client.IsCaught = player.IsCaught
 			client.Lat = player.Lat
 			client.Lng = player.Lng
+			client.HasLocation = player.HasLocation
 			client.Color = player.Color
 			client.PhotoURL = player.PhotoURL
 			client.mu.Unlock()
@@ -785,6 +801,8 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				c.IsCaught = false
 				c.Lat = 0
 				c.Lng = 0
+				c.HasLocation = false
+				c.Color = ""
 				c.mu.Unlock()
 			}
 
@@ -848,11 +866,13 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 			}
 			client.Lat = msg.Lat
 			client.Lng = msg.Lng
+			client.HasLocation = true
 			userID := client.UserID
 			client.mu.Unlock()
 			if err := db.Model(&models.Player{}).Where("room_id = ? AND user_id = ?", roomID, userID).Updates(map[string]interface{}{
-				"lat": msg.Lat,
-				"lng": msg.Lng,
+				"lat":          msg.Lat,
+				"lng":          msg.Lng,
+				"has_location": true,
 			}).Error; err != nil {
 				sendError(client, "プレイヤー情報の保存に失敗しました")
 				continue
@@ -869,9 +889,9 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 			room := GameHub.GetOrCreateRoom(roomID)
 			room.mu.RLock()
 
-			if room.Status != 1 {
+			if room.Status != 1 || !room.IsGameActive {
 				room.mu.RUnlock()
-				sendError(client, "ゲーム中ではありません")
+				sendError(client, "ゲーム本編中ではありません")
 				continue
 			}
 
@@ -915,20 +935,49 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 		// --- 3歩目：逃走者からの回答 ---
 		case "capture_response":
 			room := GameHub.GetOrCreateRoom(roomID)
+			room.mu.RLock()
+			canRespond := room.Status == 1 && room.IsGameActive
+			room.mu.RUnlock()
+			if !canRespond {
+				sendError(client, "捕獲回答はゲーム本編中のみ有効です")
+				continue
+			}
+
+			client.mu.Lock()
+			targetID := client.UserID
+			joined := client.PlayerID != "" && client.UserID != ""
+			isRunner := client.Role == 0
+			isAlreadyCaught := client.IsCaught
+			client.mu.Unlock()
+
+			if !joined {
+				sendError(client, "先に入室してください")
+				continue
+			}
+			if msg.TargetID != "" && msg.TargetID != targetID {
+				sendError(client, "捕獲回答の対象が一致しません")
+				continue
+			}
+			if !isRunner || isAlreadyCaught {
+				sendError(client, "捕獲回答の対象が不正です")
+				continue
+			}
 
 			if msg.Approved {
 				// 4歩目（承認時）：ステータスを確定させて全員に通知
+				result := db.Model(&models.Player{}).Where("room_id = ? AND user_id = ? AND role = ? AND is_caught = ?", roomID, targetID, 0, false).Update("is_caught", true)
+				if result.Error != nil {
+					sendError(client, "プレイヤー情報の保存に失敗しました")
+					continue
+				}
+				if result.RowsAffected == 0 {
+					sendError(client, "捕獲回答の対象が不正です")
+					continue
+				}
+
 				client.mu.Lock()
 				client.IsCaught = true
-				targetID := client.UserID
 				client.mu.Unlock()
-
-				if targetID != "" {
-					if err := db.Model(&models.Player{}).Where("room_id = ? AND user_id = ?", roomID, targetID).Update("is_caught", true).Error; err != nil {
-						sendError(client, "プレイヤー情報の保存に失敗しました")
-						continue
-					}
-				}
 
 				room.Broadcast(OutgoingMessage{
 					Event:    "captured",
@@ -948,10 +997,6 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				}
 			} else {
 				// 4歩目（拒否時）：不成立だったことを全員（または鬼）に通知
-				client.mu.Lock()
-				targetID := client.UserID
-				client.mu.Unlock()
-
 				room.Broadcast(OutgoingMessage{
 					Event:    "capture_denied",
 					TargetID: targetID,

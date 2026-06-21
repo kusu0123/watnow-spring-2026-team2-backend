@@ -23,6 +23,11 @@ func newTestServer(t *testing.T, room models.Room) (*gorm.DB, string, func()) {
 	if err != nil {
 		t.Fatalf("DB接続失敗: %v", err)
 	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("DB取得失敗: %v", err)
+	}
+	sqlDB.SetMaxOpenConns(1)
 	if err := db.AutoMigrate(&models.Room{}, &models.Player{}); err != nil {
 		t.Fatalf("マイグレーション失敗: %v", err)
 	}
@@ -45,10 +50,7 @@ func newTestServer(t *testing.T, room models.Room) (*gorm.DB, string, func()) {
 	baseURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/rooms/"
 	cleanup := func() {
 		server.Close()
-		sqlDB, err := db.DB()
-		if err == nil {
-			_ = sqlDB.Close()
-		}
+		_ = sqlDB.Close()
 	}
 
 	return db, baseURL, cleanup
@@ -211,6 +213,17 @@ func assertLocationNoCoords(t *testing.T, location LocationVal) {
 	}
 }
 
+func assertLocationCoords(t *testing.T, location LocationVal, lat, lng float64) {
+	t.Helper()
+
+	if location.Lat == nil || location.Lng == nil {
+		t.Fatalf("syncの座標が含まれていません: %+v", location)
+	}
+	if math.Abs(*location.Lat-lat) > 0.000001 || math.Abs(*location.Lng-lng) > 0.000001 {
+		t.Fatalf("syncの座標が不正です: got=(%f,%f) want=(%f,%f)", *location.Lat, *location.Lng, lat, lng)
+	}
+}
+
 func findWaitingPlayer(players []WaitingPlayerVal, userID string) (WaitingPlayerVal, bool) {
 	for _, player := range players {
 		if player.UserID == userID {
@@ -272,6 +285,18 @@ func assertDBPlayerExists(t *testing.T, db *gorm.DB, roomID, userID string, want
 	}
 }
 
+func assertDBPlayerCaught(t *testing.T, db *gorm.DB, roomID, userID string, want bool) {
+	t.Helper()
+
+	var player models.Player
+	if err := db.Where("room_id = ? AND user_id = ?", roomID, userID).First(&player).Error; err != nil {
+		t.Fatalf("プレイヤー取得失敗: %v", err)
+	}
+	if player.IsCaught != want {
+		t.Fatalf("DB playerのis_caughtが不正です: user_id=%s got=%v want=%v", userID, player.IsCaught, want)
+	}
+}
+
 func TestWebSocketFlow(t *testing.T) {
 	roomID := "testRoom"
 	db, baseURL, cleanup := newTestServer(t, models.Room{
@@ -320,8 +345,8 @@ func TestWebSocketFlow(t *testing.T) {
 	if err := db.Model(&models.Player{}).Where("room_id = ? AND user_id = ?", roomID, "player1").Count(&count).Error; err != nil {
 		t.Fatalf("プレイヤー件数取得失敗: %v", err)
 	}
-	if count != 1 {
-		t.Fatalf("切断後もプレイヤーは1件残る想定ですが、%d件でした", count)
+	if count != 0 {
+		t.Fatalf("waiting中の切断後はプレイヤーが削除される想定ですが、%d件でした", count)
 	}
 }
 
@@ -515,6 +540,9 @@ func TestViewerSpecificSyncPayloadAndImmediateFirstSync(t *testing.T) {
 		t.Fatalf("想定外のイベント: %s", msg.Event)
 	}
 
+	sendJSON(t, runnerConn, `{"action":"move","lat":34.7,"lng":135.5}`)
+	sendJSON(t, otherRunnerConn, `{"action":"move","lat":34.8,"lng":135.6}`)
+
 	sendJSON(t, oniConn, `{"action":"start","oni_users":["player1"]}`)
 	readUntilEvent(t, oniConn, "start")
 	readUntilEvent(t, runnerConn, "start")
@@ -536,11 +564,13 @@ func TestViewerSpecificSyncPayloadAndImmediateFirstSync(t *testing.T) {
 		t.Fatalf("鬼向けsyncに未捕獲逃走者player2が含まれていません: %+v", oniSync.Locations)
 	}
 	assertLocationMeta(t, runnerLocation, roomID, "player2", "みな", 0, false, "#FF00AA")
+	assertLocationCoords(t, runnerLocation, 34.7, 135.5)
 	otherRunnerLocation, ok := findLocation(oniSync.Locations, "player3")
 	if !ok {
 		t.Fatalf("鬼向けsyncに未捕獲逃走者player3が含まれていません: %+v", oniSync.Locations)
 	}
 	assertLocationMeta(t, otherRunnerLocation, roomID, "player3", "そうた", 0, false, "#00CC66")
+	assertLocationCoords(t, otherRunnerLocation, 34.8, 135.6)
 
 	runnerSync := readUntilEvent(t, runnerConn, "sync")
 	if len(runnerSync.Locations) != 1 {
@@ -551,6 +581,7 @@ func TestViewerSpecificSyncPayloadAndImmediateFirstSync(t *testing.T) {
 		t.Fatalf("逃走者向けsyncに自分の状態が含まれていません: %+v", runnerSync.Locations)
 	}
 	assertLocationMeta(t, selfLocation, roomID, "player2", "みな", 0, false, "#FF00AA")
+	assertLocationCoords(t, selfLocation, 34.7, 135.5)
 	if _, ok := findLocation(runnerSync.Locations, "player1"); ok {
 		t.Fatalf("逃走者向けsyncに他プレイヤーが含まれています: %+v", runnerSync.Locations)
 	}
@@ -575,6 +606,7 @@ func TestViewerSpecificSyncPayloadAndImmediateFirstSync(t *testing.T) {
 		t.Fatalf("未捕獲逃走者が鬼向けsyncに含まれていません: %+v", oniSyncAfterCapture.Locations)
 	}
 	assertLocationMeta(t, remainingRunnerLocation, roomID, "player3", "そうた", 0, false, "#00CC66")
+	assertLocationCoords(t, remainingRunnerLocation, 34.8, 135.6)
 
 	caughtRunnerSync := readUntilEvent(t, runnerConn, "sync")
 	if len(caughtRunnerSync.Locations) != 1 {
@@ -586,6 +618,56 @@ func TestViewerSpecificSyncPayloadAndImmediateFirstSync(t *testing.T) {
 	}
 	assertLocationMeta(t, caughtSelfLocation, roomID, "player2", "みな", 0, true, "#FF00AA")
 	assertLocationNoCoords(t, caughtSelfLocation)
+}
+
+func TestUnlocatedPlayersDoNotExposeZeroCoordinatesInSync(t *testing.T) {
+	roomID := "unlocatedSyncRoom"
+	_, baseURL, cleanup := newTestServer(t, models.Room{
+		ID:           roomID,
+		Status:       0,
+		TimeLimit:    120,
+		OniCount:     1,
+		SyncInterval: 30,
+		GracePeriod:  0,
+	})
+	defer cleanup()
+
+	oniConn := connectToRoom(t, baseURL, roomID)
+	defer oniConn.Close()
+	runnerConn := connectToRoom(t, baseURL, roomID)
+	defer runnerConn.Close()
+
+	sendJSON(t, oniConn, `{"action":"join","user_id":"player1","name":"はるき"}`)
+	if msg := readMessage(t, oniConn); msg.Event != "waiting" {
+		t.Fatalf("想定外のイベント: %s", msg.Event)
+	}
+	sendJSON(t, runnerConn, `{"action":"join","user_id":"player2","name":"みな"}`)
+	readUntilEvent(t, oniConn, "waiting")
+	if msg := readMessage(t, runnerConn); msg.Event != "waiting" {
+		t.Fatalf("想定外のイベント: %s", msg.Event)
+	}
+
+	sendJSON(t, oniConn, `{"action":"start","oni_users":["player1"]}`)
+	readUntilEvent(t, oniConn, "start")
+	readUntilEvent(t, runnerConn, "start")
+	readUntilEvent(t, oniConn, "game_active")
+	readUntilEvent(t, runnerConn, "game_active")
+
+	oniSync := readUntilEvent(t, oniConn, "sync")
+	if len(oniSync.Locations) != 0 {
+		t.Fatalf("位置未取得の逃走者は鬼向けsyncに出さない想定です: %+v", oniSync.Locations)
+	}
+
+	runnerSync := readUntilEvent(t, runnerConn, "sync")
+	if len(runnerSync.Locations) != 1 {
+		t.Fatalf("逃走者には座標なしの自分状態だけが届く想定です: %+v", runnerSync.Locations)
+	}
+	selfLocation, ok := findLocation(runnerSync.Locations, "player2")
+	if !ok {
+		t.Fatalf("逃走者向けsyncに自分の状態が含まれていません: %+v", runnerSync.Locations)
+	}
+	assertLocationMeta(t, selfLocation, roomID, "player2", "みな", 0, false, "")
+	assertLocationNoCoords(t, selfLocation)
 }
 
 func TestResetAfterResultKeepsConnectedPlayersAndAllowsRestart(t *testing.T) {
@@ -645,7 +727,7 @@ func TestResetAfterResultKeepsConnectedPlayersAndAllowsRestart(t *testing.T) {
 	if len(resetWaiting.Players) != 2 {
 		t.Fatalf("reset後は接続中2人だけがwaitingに戻る想定です: %+v", resetWaiting.Players)
 	}
-	assertWaitingPlayer(t, resetWaiting, "player1", "はるき", "black")
+	assertWaitingPlayer(t, resetWaiting, "player1", "はるき", "")
 	assertWaitingPlayer(t, resetWaiting, "player2", "みな", "")
 	readUntilEvent(t, runnerConn, "waiting")
 
@@ -663,7 +745,7 @@ func TestResetAfterResultKeepsConnectedPlayersAndAllowsRestart(t *testing.T) {
 		if err := db.Where("room_id = ? AND user_id = ?", roomID, userID).First(&player).Error; err != nil {
 			t.Fatalf("reset後のプレイヤー取得失敗: %v", err)
 		}
-		if player.Role != 0 || player.IsCaught {
+		if player.Role != 0 || player.IsCaught || player.Color != "" || player.HasLocation {
 			t.Fatalf("reset後のプレイヤー状態が不正です: %+v", player)
 		}
 	}
@@ -753,6 +835,65 @@ func TestLeaveDeletesPlayerInWaiting(t *testing.T) {
 	assertDBPlayerExists(t, db, roomID, "player1", false)
 }
 
+func TestWaitingDisconnectDoesNotLeaveStalePlayerForResult(t *testing.T) {
+	roomID := "waitingDisconnectStaleRoom"
+	db, baseURL, cleanup := newTestServer(t, models.Room{
+		ID:           roomID,
+		Status:       0,
+		TimeLimit:    1,
+		OniCount:     1,
+		SyncInterval: 1,
+		GracePeriod:  0,
+	})
+	defer cleanup()
+
+	oniConn := connectToRoom(t, baseURL, roomID)
+	defer oniConn.Close()
+	runnerConn := connectToRoom(t, baseURL, roomID)
+	defer runnerConn.Close()
+	staleConn := connectToRoom(t, baseURL, roomID)
+
+	sendJSON(t, oniConn, `{"action":"join","user_id":"player1","name":"はるき"}`)
+	if msg := readMessage(t, oniConn); msg.Event != "waiting" {
+		t.Fatalf("想定外のイベント: %s", msg.Event)
+	}
+	sendJSON(t, runnerConn, `{"action":"join","user_id":"player2","name":"みな"}`)
+	readUntilEvent(t, oniConn, "waiting")
+	if msg := readMessage(t, runnerConn); msg.Event != "waiting" {
+		t.Fatalf("想定外のイベント: %s", msg.Event)
+	}
+	sendJSON(t, staleConn, `{"action":"join","user_id":"player3","name":"そうた"}`)
+	readUntilEvent(t, oniConn, "waiting")
+	readUntilEvent(t, runnerConn, "waiting")
+	if msg := readMessage(t, staleConn); msg.Event != "waiting" {
+		t.Fatalf("想定外のイベント: %s", msg.Event)
+	}
+
+	if err := staleConn.Close(); err != nil {
+		t.Fatalf("切断失敗: %v", err)
+	}
+	room := GameHub.GetOrCreateRoom(roomID)
+	waitFor(t, func() bool {
+		_, ok := findClient(room, "player3")
+		return !ok
+	})
+	assertDBPlayerExists(t, db, roomID, "player3", false)
+
+	sendJSON(t, oniConn, `{"action":"start","oni_users":["player1"]}`)
+	readUntilEvent(t, oniConn, "start")
+	readUntilEvent(t, runnerConn, "start")
+	result := readUntilEvent(t, oniConn, "result")
+
+	if _, ok := findResult(result.Results, "player3"); ok {
+		t.Fatalf("waiting中に切断したplayerがresultに混ざっています: %+v", result.Results)
+	}
+	for _, survivor := range result.Survivors {
+		if survivor == "player3" {
+			t.Fatalf("waiting中に切断したplayerがsurvivorsに混ざっています: %+v", result.Survivors)
+		}
+	}
+}
+
 func TestLeaveKeepsDBPlayerDuringActive(t *testing.T) {
 	roomID := "activeLeaveRoom"
 	db, baseURL, cleanup := newTestServer(t, models.Room{
@@ -793,6 +934,56 @@ func TestLeaveKeepsDBPlayerDuringActive(t *testing.T) {
 		_, ok := findClient(room, "player2")
 		return !ok
 	})
+}
+
+func TestInvalidCaptureResponseDoesNotCatchPlayer(t *testing.T) {
+	roomID := "invalidCaptureResponseRoom"
+	db, baseURL, cleanup := newTestServer(t, models.Room{
+		ID:           roomID,
+		Status:       0,
+		TimeLimit:    120,
+		OniCount:     1,
+		SyncInterval: 30,
+		GracePeriod:  0,
+	})
+	defer cleanup()
+
+	oniConn := connectToRoom(t, baseURL, roomID)
+	defer oniConn.Close()
+	runnerConn := connectToRoom(t, baseURL, roomID)
+	defer runnerConn.Close()
+
+	sendJSON(t, oniConn, `{"action":"join","user_id":"player1","name":"はるき"}`)
+	if msg := readMessage(t, oniConn); msg.Event != "waiting" {
+		t.Fatalf("想定外のイベント: %s", msg.Event)
+	}
+	sendJSON(t, runnerConn, `{"action":"join","user_id":"player2","name":"みな"}`)
+	readUntilEvent(t, oniConn, "waiting")
+	if msg := readMessage(t, runnerConn); msg.Event != "waiting" {
+		t.Fatalf("想定外のイベント: %s", msg.Event)
+	}
+
+	sendJSON(t, runnerConn, `{"action":"capture_response","approved":true}`)
+	assertErrorMessage(t, runnerConn, "捕獲回答はゲーム本編中のみ有効です")
+	assertDBPlayerCaught(t, db, roomID, "player2", false)
+
+	sendJSON(t, oniConn, `{"action":"start","oni_users":["player1"]}`)
+	readUntilEvent(t, oniConn, "start")
+	readUntilEvent(t, runnerConn, "start")
+	readUntilEvent(t, oniConn, "game_active")
+	readUntilEvent(t, runnerConn, "game_active")
+	readUntilEvent(t, oniConn, "sync")
+
+	sendJSON(t, oniConn, `{"action":"capture_response","approved":true}`)
+	assertErrorMessage(t, oniConn, "捕獲回答の対象が不正です")
+	assertDBPlayerCaught(t, db, roomID, "player1", false)
+	assertDBPlayerCaught(t, db, roomID, "player2", false)
+
+	spoofConn := connectToRoom(t, baseURL, roomID)
+	defer spoofConn.Close()
+	sendJSON(t, spoofConn, `{"action":"capture_response","user_id":"player2","approved":true}`)
+	assertErrorMessage(t, spoofConn, "先に入室してください")
+	assertDBPlayerCaught(t, db, roomID, "player2", false)
 }
 
 func TestInvalidJSONReturnsErrorToSender(t *testing.T) {

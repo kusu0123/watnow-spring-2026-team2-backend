@@ -27,6 +27,11 @@ func newHTTPTestServer(t *testing.T, room models.Room) (*gorm.DB, *httptest.Serv
 	if err != nil {
 		t.Fatalf("DB接続失敗: %v", err)
 	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("DB取得失敗: %v", err)
+	}
+	sqlDB.SetMaxOpenConns(1)
 	if err := db.AutoMigrate(&models.Room{}, &models.Player{}); err != nil {
 		t.Fatalf("マイグレーション失敗: %v", err)
 	}
@@ -43,10 +48,7 @@ func newHTTPTestServer(t *testing.T, room models.Room) (*gorm.DB, *httptest.Serv
 	wsBaseURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/rooms/"
 	cleanup := func() {
 		server.Close()
-		sqlDB, err := db.DB()
-		if err == nil {
-			_ = sqlDB.Close()
-		}
+		_ = sqlDB.Close()
 	}
 
 	return db, server, wsBaseURL, cleanup
