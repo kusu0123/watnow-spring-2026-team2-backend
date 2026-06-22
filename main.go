@@ -29,7 +29,7 @@ func main() {
 	// サーバー終了時に、確実にデータベースの接続を閉じて後片付けする
 	defer sqlDB.Close()
 
-	if err := db.AutoMigrate(&models.Room{}, &models.Player{}); err != nil {
+	if err := db.AutoMigrate(&models.Room{}, &models.Player{}, &models.CaptureRequest{}); err != nil {
 		panic("DBマイグレーション失敗: " + err.Error())
 	}
 	r := setupRouter(db)
