@@ -2,16 +2,17 @@ package ws
 
 // フロントエンドから送られてくるデータ
 type IncomingMessage struct {
-	Action   string   `json:"action"`
-	UserID   string   `json:"user_id,omitempty"`
-	Name     string   `json:"name,omitempty"`
-	TargetID string   `json:"target_id,omitempty"`
-	Approved bool     `json:"approved,omitempty"`
-	Lat      float64  `json:"lat,omitempty"`
-	Lng      float64  `json:"lng,omitempty"`
-	Color    string   `json:"color,omitempty"`
-	OniUsers []string `json:"oni_users,omitempty"`
-	PhotoURL string   `json:"photo_url,omitempty"`
+	Action    string   `json:"action"`
+	UserID    string   `json:"user_id,omitempty"`
+	Name      string   `json:"name,omitempty"`
+	TargetID  string   `json:"target_id,omitempty"`
+	Approved  bool     `json:"approved,omitempty"`
+	Lat       float64  `json:"lat,omitempty"`
+	Lng       float64  `json:"lng,omitempty"`
+	Color     string   `json:"color,omitempty"`
+	OniUsers  []string `json:"oni_users,omitempty"`
+	PhotoURL  string   `json:"photo_url,omitempty"`
+	RequestID string   `json:"request_id,omitempty"`
 }
 
 // フロントエンドへ送信するデータ
@@ -31,6 +32,9 @@ type OutgoingMessage struct {
 	AttackerName string             `json:"attacker_name,omitempty"`
 	Approved     bool               `json:"approved,omitempty"`
 	PhotoURL     string             `json:"photo_url,omitempty"`
+	RequestID    string             `json:"request_id,omitempty"`
+	AttackerID   string             `json:"attacker_id,omitempty"`
+	ExpiresAt    string             `json:"expires_at,omitempty"`
 	Locations    []LocationVal      `json:"locations,omitempty"`
 	Survivors    []string           `json:"survivors,omitempty"`
 	Results      []ResultVal        `json:"results,omitempty"`

@@ -28,7 +28,7 @@ func newTestServer(t *testing.T, room models.Room) (*gorm.DB, string, func()) {
 		t.Fatalf("DB取得失敗: %v", err)
 	}
 	sqlDB.SetMaxOpenConns(1)
-	if err := db.AutoMigrate(&models.Room{}, &models.Player{}); err != nil {
+	if err := db.AutoMigrate(&models.Room{}, &models.Player{}, &models.CaptureRequest{}); err != nil {
 		t.Fatalf("マイグレーション失敗: %v", err)
 	}
 
@@ -238,6 +238,7 @@ func assertWaitingPlayer(t *testing.T, msg OutgoingMessage, userID, name, color 
 
 	player, ok := findWaitingPlayer(msg.Players, userID)
 	if !ok {
+		// ↓ 修正箇所：userID と msg.Players の2つを渡す！
 		t.Fatalf("waitingに%sが含まれていません: %+v", userID, msg.Players)
 	}
 	if player.Name != name || player.Color != color {
@@ -586,7 +587,16 @@ func TestViewerSpecificSyncPayloadAndImmediateFirstSync(t *testing.T) {
 		t.Fatalf("逃走者向けsyncに他プレイヤーが含まれています: %+v", runnerSync.Locations)
 	}
 
-	sendJSON(t, runnerConn, `{"action":"capture_response","approved":true}`)
+	// ★修正：鬼が捕獲申請を行う
+	sendJSON(t, oniConn, `{"action":"capture_request","target_id":"player2","photo_url":"https://example.com/test.jpg"}`)
+
+	// ★修正：逃走者が通知を受け取り、RequestIDを抜き取る
+	checkMsg := readUntilEvent(t, runnerConn, "capture_checking")
+	reqID := checkMsg.RequestID
+
+	// ★修正：抜き取ったIDを使って承認する
+	sendJSON(t, runnerConn, `{"action":"capture_response","approved":true,"request_id":"`+reqID+`"}`)
+
 	readUntilEvent(t, oniConn, "captured")
 	readUntilEvent(t, runnerConn, "captured")
 	readUntilEvent(t, otherRunnerConn, "captured")
@@ -963,7 +973,8 @@ func TestInvalidCaptureResponseDoesNotCatchPlayer(t *testing.T) {
 		t.Fatalf("想定外のイベント: %s", msg.Event)
 	}
 
-	sendJSON(t, runnerConn, `{"action":"capture_response","approved":true}`)
+	// 存在しないリクエストIDで承認しようとする（不正なレスポンス）
+	sendJSON(t, runnerConn, `{"action":"capture_response","approved":true,"request_id":"invalid-dummy-id"}`)
 	assertErrorMessage(t, runnerConn, "捕獲回答はゲーム本編中のみ有効です")
 	assertDBPlayerCaught(t, db, roomID, "player2", false)
 
@@ -974,14 +985,15 @@ func TestInvalidCaptureResponseDoesNotCatchPlayer(t *testing.T) {
 	readUntilEvent(t, runnerConn, "game_active")
 	readUntilEvent(t, oniConn, "sync")
 
-	sendJSON(t, oniConn, `{"action":"capture_response","approved":true}`)
-	assertErrorMessage(t, oniConn, "捕獲回答の対象が不正です")
+	// 鬼が不正に承認リクエストを送る
+	sendJSON(t, oniConn, `{"action":"capture_response","approved":true,"request_id":"invalid-dummy-id"}`)
+	assertErrorMessage(t, oniConn, "捕獲回答の権限がありません")
 	assertDBPlayerCaught(t, db, roomID, "player1", false)
 	assertDBPlayerCaught(t, db, roomID, "player2", false)
 
 	spoofConn := connectToRoom(t, baseURL, roomID)
 	defer spoofConn.Close()
-	sendJSON(t, spoofConn, `{"action":"capture_response","user_id":"player2","approved":true}`)
+	sendJSON(t, spoofConn, `{"action":"capture_response","user_id":"player2","approved":true,"request_id":"invalid-dummy-id"}`)
 	assertErrorMessage(t, spoofConn, "先に入室してください")
 	assertDBPlayerCaught(t, db, roomID, "player2", false)
 }
@@ -1124,7 +1136,20 @@ func TestAllRunnersCaughtImmediatelyEndsGameWithResultAndAllowsReset(t *testing.
 	runnerID := "player2"
 	readUntilEvent(t, runnerConn, "game_active")
 	readUntilEvent(t, runnerConn, "sync")
-	sendJSON(t, runnerConn, `{"action":"capture_response","approved":true}`)
+
+	// ★追加：鬼が捕獲申請を行う
+	sendJSON(t, wsConn1, `{"action":"capture_request","target_id":"player2","photo_url":"https://example.com/test.jpg"}`)
+
+	// ★追加：逃走者が通知を受け取り、RequestIDを抜き取る
+	checkMsg := readUntilEvent(t, runnerConn, "capture_checking")
+	reqID := checkMsg.RequestID
+	if reqID == "" {
+		t.Fatalf("capture_checking に RequestID が含まれていません")
+	}
+
+	// 逃走者が抜き取ったIDを使って承認する
+	sendJSON(t, runnerConn, `{"action":"capture_response","approved":true,"request_id":"`+reqID+`"}`)
+
 	if msg := readMessageWithin(t, runnerConn, 500*time.Millisecond); msg.Event != "captured" || msg.TargetID != runnerID || !msg.Approved {
 		t.Fatalf("captured通知が不正です: %+v", msg)
 	}
