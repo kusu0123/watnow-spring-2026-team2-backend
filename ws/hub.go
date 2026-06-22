@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/watnow/watnow-spring-2026-team2-backend/models"
 	"gorm.io/gorm"
@@ -885,6 +886,10 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				sendError(client, "捕まえる相手が見つかりません")
 				continue
 			}
+			if msg.PhotoURL == "" {
+				sendError(client, "証拠写真のURLがありません") // 仕様書通り必須化
+				continue
+			}
 
 			room := GameHub.GetOrCreateRoom(roomID)
 			room.mu.RLock()
@@ -898,6 +903,7 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 			client.mu.Lock()
 			isAttackerOni := client.Role == 1
 			attackerName := client.Name
+			attackerID := client.UserID
 			client.mu.Unlock()
 
 			if !isAttackerOni {
@@ -905,10 +911,13 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				sendError(client, "あなたは鬼ではありません")
 				continue
 			}
+			if attackerID == msg.TargetID {
+				room.mu.RUnlock()
+				sendError(client, "自分自身は捕まえられません")
+				continue
+			}
 
 			var targetClient *Client
-
-			// ターゲットのClientを探す
 			for c := range room.Clients {
 				c.mu.Lock()
 				isTarget := c.UserID == msg.TargetID && c.Role == 0 && !c.IsCaught
@@ -920,20 +929,90 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 			}
 			room.mu.RUnlock()
 
-			if targetClient != nil {
-				// 2歩目：ターゲット（逃走者）だけに確認通知を個別送信
-				targetClient.mu.Lock()
-				_ = targetClient.Conn.WriteJSON(OutgoingMessage{
-					Event:        "capture_checking",
-					AttackerName: attackerName, // ← ここで上で作った変数を使う！
-					PhotoURL:     msg.PhotoURL, // ← ★追加：鬼から届いたURLをそのまま逃走者に渡す
-				})
-				targetClient.mu.Unlock()
-			} else {
+			if targetClient == nil {
 				sendError(client, "対象の逃走者が見つからないか、すでに捕まっています")
+				continue
 			}
+
+			// 同一ターゲットへのPending確認
+			var existingPending int64
+			db.Model(&models.CaptureRequest{}).Where("room_id = ? AND target_user_id = ? AND status = ?", roomID, msg.TargetID, "pending").Count(&existingPending)
+			if existingPending > 0 {
+				sendError(client, "この逃走者には既に捕獲申請中です")
+				continue
+			}
+
+			// request_id (UUID v4) の生成とDB保存
+			requestID := uuid.New().String()
+			now := time.Now()
+			expiresAt := now.Add(30 * time.Second)
+
+			captureReq := models.CaptureRequest{
+				ID:             requestID,
+				RoomID:         roomID,
+				AttackerUserID: attackerID,
+				TargetUserID:   msg.TargetID,
+				Status:         "pending",
+				PhotoURL:       msg.PhotoURL,
+				CreatedAt:      now,
+				ExpiresAt:      expiresAt,
+			}
+
+			if err := db.Create(&captureReq).Error; err != nil {
+				sendError(client, "捕獲申請の保存に失敗しました")
+				continue
+			}
+
+			// 2歩目：ターゲット（逃走者）だけに確認通知を個別送信
+			targetClient.mu.Lock()
+			_ = targetClient.Conn.WriteJSON(OutgoingMessage{
+				Event:        "capture_checking",
+				RequestID:    requestID,
+				AttackerID:   attackerID,
+				AttackerName: attackerName,
+				TargetID:     msg.TargetID,
+				PhotoURL:     msg.PhotoURL,
+				ExpiresAt:    expiresAt.Format(time.RFC3339),
+			})
+			targetClient.mu.Unlock()
+
+			// 30秒ExpireのGoroutine起動
+			go func(reqID, rID, tID, aID string) {
+				time.Sleep(30 * time.Second)
+
+				// 排他制御：30秒後にまだpendingならexpiredに更新する
+				result := db.Model(&models.CaptureRequest{}).
+					Where("id = ? AND status = ?", reqID, "pending").
+					Update("status", "expired")
+
+				if result.Error == nil && result.RowsAffected > 0 {
+					// Expiredに更新成功（誰も回答しなかった）ため、鬼と逃走者に通知
+					expMsg := OutgoingMessage{
+						Event:      "capture_expired",
+						RequestID:  reqID,
+						TargetID:   tID,
+						AttackerID: aID,
+					}
+					// 対象の2人だけに送る
+					r := GameHub.GetOrCreateRoom(rID)
+					for _, c := range r.clientList() {
+						c.mu.Lock()
+						uid := c.UserID
+						c.mu.Unlock()
+						if uid == tID || uid == aID {
+							_ = sendToClient(c, expMsg)
+						}
+					}
+				}
+			}(requestID, roomID, msg.TargetID, attackerID)
+
 		// --- 3歩目：逃走者からの回答 ---
 		case "capture_response":
+			if msg.RequestID == "" {
+				sendError(client, "リクエストIDがありません")
+				continue
+			}
+
 			room := GameHub.GetOrCreateRoom(roomID)
 			room.mu.RLock()
 			canRespond := room.Status == 1 && room.IsGameActive
@@ -954,24 +1033,58 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				sendError(client, "先に入室してください")
 				continue
 			}
-			if msg.TargetID != "" && msg.TargetID != targetID {
-				sendError(client, "捕獲回答の対象が一致しません")
+			if !isRunner || isAlreadyCaught {
+				sendError(client, "捕獲回答の権限がありません")
 				continue
 			}
-			if !isRunner || isAlreadyCaught {
-				sendError(client, "捕獲回答の対象が不正です")
+
+			// DBから対象のリクエストを取得
+			var req models.CaptureRequest
+			if err := db.Where("id = ?", msg.RequestID).First(&req).Error; err != nil {
+				sendError(client, "存在しない捕獲申請です")
+				continue
+			}
+
+			if req.Status != "pending" {
+				sendError(client, "この捕獲申請はすでに処理済みか、期限切れです")
+				continue
+			}
+			if req.TargetUserID != targetID {
+				sendError(client, "自分宛ての捕獲申請にしか回答できません")
+				continue
+			}
+			if time.Now().After(req.ExpiresAt) {
+				sendError(client, "この捕獲申請は期限切れです")
+				continue
+			}
+
+			now := time.Now()
+			newStatus := "rejected"
+			if msg.Approved {
+				newStatus = "approved"
+			}
+
+			// 排他制御：pending状態のときだけ更新（他で処理されていないことを担保）
+			result := db.Model(&models.CaptureRequest{}).
+				Where("id = ? AND status = ?", msg.RequestID, "pending").
+				Updates(map[string]interface{}{
+					"status":       newStatus,
+					"responded_at": now,
+				})
+
+			if result.Error != nil || result.RowsAffected == 0 {
+				sendError(client, "回答の保存に失敗しました（すでに処理されている可能性があります）")
 				continue
 			}
 
 			if msg.Approved {
-				// 4歩目（承認時）：ステータスを確定させて全員に通知
-				result := db.Model(&models.Player{}).Where("room_id = ? AND user_id = ? AND role = ? AND is_caught = ?", roomID, targetID, 0, false).Update("is_caught", true)
-				if result.Error != nil {
-					sendError(client, "プレイヤー情報の保存に失敗しました")
-					continue
-				}
-				if result.RowsAffected == 0 {
-					sendError(client, "捕獲回答の対象が不正です")
+				// 承認された場合のみ、Playerを確保状態にする
+				pResult := db.Model(&models.Player{}).
+					Where("room_id = ? AND user_id = ? AND role = ? AND is_caught = ?", roomID, targetID, 0, false).
+					Update("is_caught", true)
+
+				if pResult.Error != nil || pResult.RowsAffected == 0 {
+					sendError(client, "プレイヤー状態の更新に失敗しました")
 					continue
 				}
 
@@ -980,9 +1093,12 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				client.mu.Unlock()
 
 				room.Broadcast(OutgoingMessage{
-					Event:    "captured",
-					TargetID: targetID,
-					Approved: true,
+					Event:      "captured",
+					RequestID:  msg.RequestID,
+					TargetID:   targetID,
+					AttackerID: req.AttackerUserID,
+					Approved:   true,
+					PhotoURL:   req.PhotoURL,
 				})
 
 				if roomStatus(room) == 1 {
@@ -996,12 +1112,24 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 					}
 				}
 			} else {
-				// 4歩目（拒否時）：不成立だったことを全員（または鬼）に通知
-				room.Broadcast(OutgoingMessage{
-					Event:    "capture_denied",
-					TargetID: targetID,
-				})
+				// 拒否された場合は、鬼と逃走者のみに通知
+				deniedMsg := OutgoingMessage{
+					Event:      "capture_denied",
+					RequestID:  msg.RequestID,
+					TargetID:   targetID,
+					AttackerID: req.AttackerUserID,
+					Approved:   false,
+				}
+				for _, c := range room.clientList() {
+					c.mu.Lock()
+					uid := c.UserID
+					c.mu.Unlock()
+					if uid == targetID || uid == req.AttackerUserID {
+						_ = sendToClient(c, deniedMsg)
+					}
+				}
 			}
+
 		default:
 			sendError(client, "対応していない操作です")
 		}
