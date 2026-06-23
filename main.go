@@ -53,12 +53,13 @@ type areaCenterInput struct {
 }
 
 type roomSettingsInput struct {
-	TimeLimit    int              `json:"time_limit"`
-	OniCount     int              `json:"oni_count"`
-	AreaSize     string           `json:"area_size"`
-	SyncInterval int              `json:"sync_interval"`
-	GracePeriod  int              `json:"grace_period"`
-	AreaCenter   *areaCenterInput `json:"area_center"`
+	TimeLimit      int              `json:"time_limit"`
+	OniCount       int              `json:"oni_count"`
+	AreaSize       string           `json:"area_size"`
+	SyncInterval   int              `json:"sync_interval"`
+	GracePeriod    int              `json:"grace_period"`
+	MissionEnabled *bool            `json:"mission_enabled"`
+	AreaCenter     *areaCenterInput `json:"area_center"`
 }
 
 func isAllowedInt(value int, allowedValues ...int) bool {
@@ -155,6 +156,9 @@ func setupRouter(db *gorm.DB) *gin.Engine {
 			"area_size":     input.AreaSize,
 			"sync_interval": input.SyncInterval,
 			"grace_period":  input.GracePeriod,
+		}
+		if input.MissionEnabled != nil {
+			updates["mission_enabled"] = *input.MissionEnabled
 		}
 		if input.AreaCenter != nil {
 			updates["area_center_lat"] = input.AreaCenter.Lat

@@ -351,6 +351,125 @@ func TestWebSocketFlow(t *testing.T) {
 	}
 }
 
+func TestUpdateColorBroadcastsAndPersistsWaiting(t *testing.T) {
+	roomID := "updateColorRoom"
+	db, baseURL, cleanup := newTestServer(t, models.Room{
+		ID:        roomID,
+		Status:    0,
+		TimeLimit: 900,
+	})
+	defer cleanup()
+
+	wsConn1 := connectToRoom(t, baseURL, roomID)
+	defer wsConn1.Close()
+	wsConn2 := connectToRoom(t, baseURL, roomID)
+	defer wsConn2.Close()
+
+	sendJSON(t, wsConn1, `{"action":"join","user_id":"player1","name":"はるき","color":"#0000FF"}`)
+	if msg := readMessage(t, wsConn1); msg.Event != "waiting" {
+		t.Fatalf("想定外のイベント: %s", msg.Event)
+	}
+	sendJSON(t, wsConn2, `{"action":"join","user_id":"player2","name":"みな","color":"#FF00AA"}`)
+	readUntilEvent(t, wsConn1, "waiting")
+	if msg := readMessage(t, wsConn2); msg.Event != "waiting" {
+		t.Fatalf("想定外のイベント: %s", msg.Event)
+	}
+
+	sendJSON(t, wsConn1, `{"action":"update_color","color":"#00cc66"}`)
+	waiting1 := readUntilEvent(t, wsConn1, "waiting")
+	waiting2 := readUntilEvent(t, wsConn2, "waiting")
+	assertWaitingPlayer(t, waiting1, "player1", "はるき", "#00CC66")
+	assertWaitingPlayer(t, waiting2, "player1", "はるき", "#00CC66")
+
+	var player models.Player
+	if err := db.Where("room_id = ? AND user_id = ?", roomID, "player1").First(&player).Error; err != nil {
+		t.Fatalf("プレイヤー取得失敗: %v", err)
+	}
+	if player.Color != "#00CC66" {
+		t.Fatalf("DBのcolorが更新されていません: %+v", player)
+	}
+}
+
+func TestUpdateColorRejectsInvalidColor(t *testing.T) {
+	roomID := "invalidUpdateColorRoom"
+	_, baseURL, cleanup := newTestServer(t, models.Room{
+		ID:        roomID,
+		Status:    0,
+		TimeLimit: 900,
+	})
+	defer cleanup()
+
+	wsConn := connectToRoom(t, baseURL, roomID)
+	defer wsConn.Close()
+
+	sendJSON(t, wsConn, `{"action":"join","user_id":"player1","name":"はるき","color":"#0000FF"}`)
+	if msg := readMessage(t, wsConn); msg.Event != "waiting" {
+		t.Fatalf("想定外のイベント: %s", msg.Event)
+	}
+
+	sendJSON(t, wsConn, `{"action":"update_color","color":"#GGGGGG"}`)
+	assertErrorMessage(t, wsConn, "カラーの形式が不正です（例: #FF0000）")
+	sendJSON(t, wsConn, `{"action":"update_color"}`)
+	assertErrorMessage(t, wsConn, "カラーを選択してください")
+}
+
+func TestUpdateColorReflectsNextActiveSync(t *testing.T) {
+	roomID := "activeUpdateColorRoom"
+	_, baseURL, cleanup := newTestServer(t, models.Room{
+		ID:           roomID,
+		Status:       0,
+		TimeLimit:    120,
+		OniCount:     1,
+		SyncInterval: 30,
+		GracePeriod:  0,
+	})
+	defer cleanup()
+
+	oniConn := connectToRoom(t, baseURL, roomID)
+	defer oniConn.Close()
+	runnerConn := connectToRoom(t, baseURL, roomID)
+	defer runnerConn.Close()
+
+	sendJSON(t, oniConn, `{"action":"join","user_id":"player1","name":"はるき","color":"#0000FF"}`)
+	if msg := readMessage(t, oniConn); msg.Event != "waiting" {
+		t.Fatalf("想定外のイベント: %s", msg.Event)
+	}
+	sendJSON(t, runnerConn, `{"action":"join","user_id":"player2","name":"みな","color":"#FF00AA"}`)
+	readUntilEvent(t, oniConn, "waiting")
+	if msg := readMessage(t, runnerConn); msg.Event != "waiting" {
+		t.Fatalf("想定外のイベント: %s", msg.Event)
+	}
+	sendJSON(t, runnerConn, `{"action":"move","lat":34.7,"lng":135.5}`)
+
+	sendJSON(t, oniConn, `{"action":"start","oni_users":["player1"]}`)
+	readUntilEvent(t, oniConn, "start")
+	readUntilEvent(t, runnerConn, "start")
+	readUntilEvent(t, oniConn, "game_active")
+	readUntilEvent(t, runnerConn, "game_active")
+	readUntilEvent(t, runnerConn, "sync")
+
+	sendJSON(t, runnerConn, `{"action":"update_color","color":"#00CC66"}`)
+	room := GameHub.GetOrCreateRoom(roomID)
+	waitFor(t, func() bool {
+		client, ok := findClient(room, "player2")
+		if !ok {
+			return false
+		}
+		client.mu.Lock()
+		color := client.Color
+		client.mu.Unlock()
+		return color == "#00CC66"
+	})
+	room.SendSyncToAll()
+
+	syncMsg := readUntilEvent(t, runnerConn, "sync")
+	location, ok := findLocation(syncMsg.Locations, "player2")
+	if !ok {
+		t.Fatalf("syncにplayer2が含まれていません: %+v", syncMsg.Locations)
+	}
+	assertLocationMeta(t, location, roomID, "player2", "みな", 0, false, "#00CC66")
+}
+
 func TestWebSocketRoomNotFound(t *testing.T) {
 	_, baseURL, cleanup := newTestServer(t, models.Room{})
 	defer cleanup()

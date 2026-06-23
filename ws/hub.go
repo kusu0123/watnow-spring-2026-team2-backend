@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -52,6 +53,7 @@ type RoomState struct {
 	AreaSize       string
 	SyncInterval   int // 追加
 	GracePeriod    int // 追加
+	MissionEnabled bool
 	AreaCenterLat  float64
 	AreaCenterLng  float64
 	HasAreaCenter  bool
@@ -90,6 +92,18 @@ func sendError(client *Client, message string) {
 	client.mu.Unlock()
 }
 
+func normalizeHexColor(color string) (string, bool) {
+	if len(color) != 7 || color[0] != '#' {
+		return "", false
+	}
+	for _, ch := range color[1:] {
+		if !((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F')) {
+			return "", false
+		}
+	}
+	return strings.ToUpper(color), true
+}
+
 func (h *Hub) UpdateRoomSettings(roomID string, timeLimit, oniCount int, areaSize string, syncInterval, gracePeriod int) {
 	timeLimit, syncInterval, gracePeriod = cleanGameSettings(timeLimit, syncInterval, gracePeriod)
 
@@ -115,6 +129,7 @@ func (h *Hub) UpdateRoomSettingsFromModel(room models.Room) *RoomState {
 	roomState.AreaSize = room.AreaSize
 	roomState.SyncInterval = syncInterval
 	roomState.GracePeriod = gracePeriod
+	roomState.MissionEnabled = room.MissionEnabled
 	roomState.AreaCenterLat = room.AreaCenterLat
 	roomState.AreaCenterLng = room.AreaCenterLng
 	roomState.HasAreaCenter = room.HasAreaCenter
@@ -482,10 +497,13 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				continue
 			}
 
-			// カラーコード（例: #FF0000）の簡易チェック：7文字で「#」から始まるか
-			if msg.Color != "" && (len(msg.Color) != 7 || msg.Color[0] != '#') {
-				sendError(client, "カラーの形式が不正です（例: #FF0000）")
-				continue
+			if msg.Color != "" {
+				normalizedColor, ok := normalizeHexColor(msg.Color)
+				if !ok {
+					sendError(client, "カラーの形式が不正です（例: #FF0000）")
+					continue
+				}
+				msg.Color = normalizedColor
 			}
 
 			status := roomStatus(room)
@@ -579,6 +597,61 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				if playerExists {
 					sendRoomSettingsToClient(roomID, client, room, player.UserID)
 				}
+			}
+
+		case "update_color":
+			if msg.Color == "" {
+				sendError(client, "カラーを選択してください")
+				continue
+			}
+			normalizedColor, ok := normalizeHexColor(msg.Color)
+			if !ok {
+				sendError(client, "カラーの形式が不正です（例: #FF0000）")
+				continue
+			}
+
+			client.mu.Lock()
+			userID := client.UserID
+			playerID := client.PlayerID
+			role := client.Role
+			client.mu.Unlock()
+			if userID == "" || playerID == "" {
+				sendError(client, "先に入室してください")
+				continue
+			}
+			if role == 1 {
+				sendError(client, "鬼のカラーは変更できません")
+				continue
+			}
+
+			var player models.Player
+			if err := db.Where("room_id = ? AND user_id = ?", roomID, userID).First(&player).Error; err != nil {
+				sendError(client, "プレイヤー情報の取得に失敗しました")
+				continue
+			}
+
+			if player.Role == 1 {
+				sendError(client, "鬼のカラーは変更できません")
+				continue
+			}
+			if err := db.Model(&models.Player{}).Where("room_id = ? AND user_id = ?", roomID, userID).Update("color", normalizedColor).Error; err != nil {
+				sendError(client, "プレイヤーカラーの保存に失敗しました")
+				continue
+			}
+
+			for _, c := range room.clientList() {
+				c.mu.Lock()
+				if c.UserID == userID {
+					c.Color = normalizedColor
+				}
+				c.mu.Unlock()
+			}
+
+			if roomStatus(room) == 0 {
+				room.Broadcast(OutgoingMessage{
+					Event:   "waiting",
+					Players: room.waitingPlayers(),
+				})
 			}
 
 		case "start":

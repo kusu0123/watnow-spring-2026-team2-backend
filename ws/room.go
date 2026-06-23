@@ -67,13 +67,14 @@ func (room *RoomState) roomSettingsMessage() RoomSettingsMessage {
 	}
 
 	return RoomSettingsMessage{
-		Event:        "room_settings",
-		TimeLimit:    timeLimit,
-		OniCount:     room.OniCount,
-		AreaSize:     room.AreaSize,
-		SyncInterval: syncInterval,
-		GracePeriod:  gracePeriod,
-		AreaCenter:   areaCenter,
+		Event:          "room_settings",
+		TimeLimit:      timeLimit,
+		OniCount:       room.OniCount,
+		AreaSize:       room.AreaSize,
+		SyncInterval:   syncInterval,
+		GracePeriod:    gracePeriod,
+		MissionEnabled: room.MissionEnabled,
+		AreaCenter:     areaCenter,
 	}
 }
 
