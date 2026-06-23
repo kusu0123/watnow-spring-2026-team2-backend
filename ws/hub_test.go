@@ -470,6 +470,69 @@ func TestUpdateColorReflectsNextActiveSync(t *testing.T) {
 	assertLocationMeta(t, location, roomID, "player2", "みな", 0, false, "#00CC66")
 }
 
+func TestStartRouletteBroadcastsToRoom(t *testing.T) {
+	roomID := "rouletteRoom"
+	_, baseURL, cleanup := newTestServer(t, models.Room{
+		ID:        roomID,
+		Status:    0,
+		TimeLimit: 900,
+	})
+	defer cleanup()
+
+	hostConn := connectToRoom(t, baseURL, roomID)
+	defer hostConn.Close()
+	guestConn := connectToRoom(t, baseURL, roomID)
+	defer guestConn.Close()
+
+	sendJSON(t, hostConn, `{"action":"join","user_id":"player1","name":"はるき"}`)
+	if msg := readMessage(t, hostConn); msg.Event != "waiting" {
+		t.Fatalf("想定外のイベント: %s", msg.Event)
+	}
+	sendJSON(t, guestConn, `{"action":"join","user_id":"player2","name":"みな"}`)
+	readUntilEvent(t, hostConn, "waiting")
+	if msg := readMessage(t, guestConn); msg.Event != "waiting" {
+		t.Fatalf("想定外のイベント: %s", msg.Event)
+	}
+
+	sendJSON(t, hostConn, `{"action":"start_roulette"}`)
+	if msg := readUntilEvent(t, hostConn, "roulette_started"); msg.Event != "roulette_started" {
+		t.Fatalf("hostにroulette_startedが届いていません: %+v", msg)
+	}
+	if msg := readUntilEvent(t, guestConn, "roulette_started"); msg.Event != "roulette_started" {
+		t.Fatalf("guestにroulette_startedが届いていません: %+v", msg)
+	}
+}
+
+func TestJoinNameValidationTrimsAndCountsRunes(t *testing.T) {
+	roomID := "nameValidationRoom"
+	db, baseURL, cleanup := newTestServer(t, models.Room{
+		ID:        roomID,
+		Status:    0,
+		TimeLimit: 900,
+	})
+	defer cleanup()
+
+	wsConn := connectToRoom(t, baseURL, roomID)
+	defer wsConn.Close()
+
+	sendJSON(t, wsConn, `{"action":"join","user_id":"player1","name":"  あいうえおかきくけこさし  "}`)
+	waiting := readUntilEvent(t, wsConn, "waiting")
+	assertWaitingPlayer(t, waiting, "player1", "あいうえおかきくけこさし", "")
+
+	var player models.Player
+	if err := db.Where("room_id = ? AND user_id = ?", roomID, "player1").First(&player).Error; err != nil {
+		t.Fatalf("プレイヤー取得失敗: %v", err)
+	}
+	if player.Name != "あいうえおかきくけこさし" {
+		t.Fatalf("trim後の名前が保存されていません: %+v", player)
+	}
+
+	invalidConn := connectToRoom(t, baseURL, roomID)
+	defer invalidConn.Close()
+	sendJSON(t, invalidConn, `{"action":"join","user_id":"player2","name":"あいうえおかきくけこさしす"}`)
+	assertErrorMessage(t, invalidConn, "名前は1文字以上、12文字以下にしてください")
+}
+
 func TestWebSocketRoomNotFound(t *testing.T) {
 	_, baseURL, cleanup := newTestServer(t, models.Room{})
 	defer cleanup()
@@ -1194,12 +1257,18 @@ func TestTimeLimitEndsGameWithResult(t *testing.T) {
 	if result.Name != "はるき" || result.Role != 1 || result.IsCaught {
 		t.Fatalf("player1の結果が不正です: %+v", result)
 	}
+	if result.SurvivalSeconds != nil {
+		t.Fatalf("鬼のsurvival_secondsは省略する想定です: %+v", result)
+	}
 	runnerResult, ok := findResult(msg.Results, "player2")
 	if !ok {
 		t.Fatalf("resultにplayer2が含まれていません: %+v", msg.Results)
 	}
 	if runnerResult.Name != "みな" || runnerResult.Role != 0 || runnerResult.IsCaught {
 		t.Fatalf("player2の結果が不正です: %+v", runnerResult)
+	}
+	if runnerResult.SurvivalSeconds == nil || *runnerResult.SurvivalSeconds < 0 {
+		t.Fatalf("逃げ切りrunnerのsurvival_secondsが不正です: %+v", runnerResult)
 	}
 
 	waitFor(t, func() bool {
@@ -1287,6 +1356,15 @@ func TestAllRunnersCaughtImmediatelyEndsGameWithResultAndAllowsReset(t *testing.
 	}
 	if result.Role != 0 || !result.IsCaught {
 		t.Fatalf("逃走者の結果が不正です: %+v", result)
+	}
+	if result.PhotoURL != "https://example.com/test.jpg" {
+		t.Fatalf("逃走者のphoto_urlがresultに反映されていません: %+v", result)
+	}
+	if result.CapturedAt == "" {
+		t.Fatalf("捕獲済みrunnerにcaptured_atが含まれていません: %+v", result)
+	}
+	if result.SurvivalSeconds == nil || *result.SurvivalSeconds < 0 {
+		t.Fatalf("捕獲済みrunnerのsurvival_secondsが不正です: %+v", result)
 	}
 
 	waitFor(t, func() bool {

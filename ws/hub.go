@@ -42,6 +42,7 @@ type Client struct {
 	HasLocation    bool
 	Color          string
 	PhotoURL       string
+	CapturedAt     *time.Time
 	LeftExplicitly bool
 	mu             sync.Mutex
 }
@@ -102,6 +103,12 @@ func normalizeHexColor(color string) (string, bool) {
 		}
 	}
 	return strings.ToUpper(color), true
+}
+
+func normalizePlayerName(name string) (string, bool) {
+	trimmed := strings.TrimSpace(name)
+	length := len([]rune(trimmed))
+	return trimmed, length >= 1 && length <= 12
 }
 
 func (h *Hub) UpdateRoomSettings(roomID string, timeLimit, oniCount int, areaSize string, syncInterval, gracePeriod int) {
@@ -309,6 +316,8 @@ func resetRoomForReplay(roomID string, room *RoomState, db *gorm.DB) error {
 				"lng":          0,
 				"has_location": false,
 				"color":        "",
+				"photo_url":    "",
+				"captured_at":  nil,
 			}).Error; err != nil {
 				return err
 			}
@@ -492,10 +501,12 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				continue
 			}
 
-			if len(msg.Name) == 0 || len(msg.Name) > 20 {
-				sendError(client, "名前は1文字以上、20文字以下にしてください")
+			normalizedName, ok := normalizePlayerName(msg.Name)
+			if !ok {
+				sendError(client, "名前は1文字以上、12文字以下にしてください")
 				continue
 			}
+			msg.Name = normalizedName
 
 			if msg.Color != "" {
 				normalizedColor, ok := normalizeHexColor(msg.Color)
@@ -568,6 +579,7 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 			client.HasLocation = player.HasLocation
 			client.Color = player.Color
 			client.PhotoURL = player.PhotoURL
+			client.CapturedAt = player.CapturedAt
 			client.mu.Unlock()
 
 			GameHub.Register(roomID, client)
@@ -653,6 +665,21 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 					Players: room.waitingPlayers(),
 				})
 			}
+
+		case "start_roulette":
+			client.mu.Lock()
+			userID := client.UserID
+			playerID := client.PlayerID
+			client.mu.Unlock()
+			if userID == "" || playerID == "" {
+				sendError(client, "先に入室してください")
+				continue
+			}
+			if roomStatus(room) != 0 {
+				sendError(client, "ルーレット開始は待機中のみ実行できます")
+				continue
+			}
+			room.Broadcast(OutgoingMessage{Event: "roulette_started"})
 
 		case "start":
 			room.mu.Lock()
@@ -877,6 +904,8 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				c.Lng = 0
 				c.HasLocation = false
 				c.Color = ""
+				c.PhotoURL = ""
+				c.CapturedAt = nil
 				c.mu.Unlock()
 			}
 
@@ -1154,7 +1183,11 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				// 承認された場合のみ、Playerを確保状態にする
 				pResult := db.Model(&models.Player{}).
 					Where("room_id = ? AND user_id = ? AND role = ? AND is_caught = ?", roomID, targetID, 0, false).
-					Update("is_caught", true)
+					Updates(map[string]interface{}{
+						"is_caught":   true,
+						"photo_url":   req.PhotoURL,
+						"captured_at": now,
+					})
 
 				if pResult.Error != nil || pResult.RowsAffected == 0 {
 					sendError(client, "プレイヤー状態の更新に失敗しました")
@@ -1163,6 +1196,8 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 
 				client.mu.Lock()
 				client.IsCaught = true
+				client.PhotoURL = req.PhotoURL
+				client.CapturedAt = &now
 				client.mu.Unlock()
 
 				room.Broadcast(OutgoingMessage{

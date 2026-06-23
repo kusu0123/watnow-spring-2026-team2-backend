@@ -80,9 +80,11 @@ type LocationVal struct {
 
 // 結果発表用のまとまり
 type ResultVal struct {
-	UserID   string `json:"user_id"`
-	Name     string `json:"name"`
-	Role     int    `json:"role"`
-	IsCaught bool   `json:"is_caught"`
-	PhotoURL string `json:"photo_url,omitempty"`
+	UserID          string `json:"user_id"`
+	Name            string `json:"name"`
+	Role            int    `json:"role"`
+	IsCaught        bool   `json:"is_caught"`
+	PhotoURL        string `json:"photo_url,omitempty"`
+	CapturedAt      string `json:"captured_at,omitempty"`
+	SurvivalSeconds *int   `json:"survival_seconds,omitempty"`
 }

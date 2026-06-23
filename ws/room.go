@@ -108,6 +108,7 @@ type syncPlayerSnapshot struct {
 	HasLocation bool
 	Color       string
 	PhotoURL    string
+	CapturedAt  *time.Time
 }
 
 func snapshotClient(client *Client) syncPlayerSnapshot {
@@ -130,6 +131,7 @@ func snapshotClient(client *Client) syncPlayerSnapshot {
 		HasLocation: client.HasLocation,
 		Color:       client.Color,
 		PhotoURL:    client.PhotoURL,
+		CapturedAt:  client.CapturedAt,
 	}
 }
 
@@ -228,10 +230,34 @@ func (room *RoomState) resultMessage(roomID string, db *gorm.DB) (OutgoingMessag
 		return OutgoingMessage{}, err
 	}
 
-	return resultMessageFromPlayers(players), nil
+	activeAt, endedAt := room.resultTiming()
+	return resultMessageFromPlayers(players, activeAt, endedAt), nil
 }
 
-func resultMessageFromPlayers(players []models.Player) OutgoingMessage {
+func (room *RoomState) resultTiming() (time.Time, time.Time) {
+	room.mu.RLock()
+	activeAt := room.ActiveAt
+	timeLimit := room.TimeLimit
+	room.mu.RUnlock()
+
+	endedAt := time.Now()
+	if !activeAt.IsZero() && timeLimit > 0 {
+		limitEnd := activeAt.Add(time.Duration(timeLimit) * time.Second)
+		if endedAt.After(limitEnd) {
+			endedAt = limitEnd
+		}
+	}
+	return activeAt, endedAt
+}
+
+func survivalSeconds(activeAt, endedAt time.Time) int {
+	if activeAt.IsZero() || endedAt.Before(activeAt) {
+		return 0
+	}
+	return int(endedAt.Sub(activeAt).Seconds())
+}
+
+func resultMessageFromPlayers(players []models.Player, activeAt, endedAt time.Time) OutgoingMessage {
 	results := make([]ResultVal, 0, len(players))
 	var survivors []string
 
@@ -244,8 +270,18 @@ func resultMessageFromPlayers(players []models.Player) OutgoingMessage {
 			PhotoURL: player.PhotoURL,
 		}
 
-		if result.Role == 0 && !result.IsCaught {
-			survivors = append(survivors, result.UserID)
+		if result.Role == 0 {
+			if result.IsCaught {
+				if player.CapturedAt != nil {
+					result.CapturedAt = player.CapturedAt.Format(time.RFC3339)
+					seconds := survivalSeconds(activeAt, *player.CapturedAt)
+					result.SurvivalSeconds = &seconds
+				}
+			} else {
+				survivors = append(survivors, result.UserID)
+				seconds := survivalSeconds(activeAt, endedAt)
+				result.SurvivalSeconds = &seconds
+			}
 		}
 		results = append(results, result)
 	}
@@ -268,12 +304,13 @@ func (room *RoomState) resultMessageFromClients() OutgoingMessage {
 			continue
 		}
 		players = append(players, models.Player{
-			ID:       snapshot.PlayerID,
-			UserID:   snapshot.UserID,
-			Name:     snapshot.Name,
-			Role:     snapshot.Role,
-			IsCaught: snapshot.IsCaught,
-			PhotoURL: snapshot.PhotoURL,
+			ID:         snapshot.PlayerID,
+			UserID:     snapshot.UserID,
+			Name:       snapshot.Name,
+			Role:       snapshot.Role,
+			IsCaught:   snapshot.IsCaught,
+			PhotoURL:   snapshot.PhotoURL,
+			CapturedAt: snapshot.CapturedAt,
 		})
 	}
 
@@ -281,7 +318,8 @@ func (room *RoomState) resultMessageFromClients() OutgoingMessage {
 		return players[i].UserID < players[j].UserID
 	})
 
-	return resultMessageFromPlayers(players)
+	activeAt, endedAt := room.resultTiming()
+	return resultMessageFromPlayers(players, activeAt, endedAt)
 }
 
 func (room *RoomState) resultMessageBestEffort(roomID string, db *gorm.DB) OutgoingMessage {
