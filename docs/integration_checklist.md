@@ -14,6 +14,8 @@
 | 最大参加人数 | 15 人 |
 | 最小開始人数 | 2 人 |
 | 鬼人数 | 1 から 3 人。全員鬼は禁止 |
+| 名前 | 前後空白を除いて 1 から 12 文字 |
+| player color | `#RRGGBB`。`#000000` は鬼用 |
 
 ## Step3 確認
 
@@ -43,8 +45,14 @@
 | 30 秒放置 | `pending` request が期限到達する | Step4 以降 |
 | capture_expired | 申請鬼 + 対象逃走者へ `capture_expired` が届く | Step4 以降 |
 | expired 後 response 拒否 | 期限切れ request への `capture_response` が拒否される | Step4 以降 |
+| update_color | 待機中は `waiting`、ゲーム中は次回 `sync` に反映される | 実装済み |
+| color 重複拒否 | 同じ room の他 player と同じ色、または `#000000` が拒否される | 実装済み |
+| room_settings broadcast | `PUT /rooms/:id` 後に全員へ `mission_enabled` を含む最新設定が届く | 実装済み |
+| roulette_started | host の `start_roulette` で全員へ `roulette_started` が届く | 実装済み |
+| host移譲 | waiting中にhostが退出すると残りplayerへhostが移る | 実装済み |
 | 捕獲済み runner の位置非表示 | 捕獲済み逃走者の座標が他プレイヤーの表示対象にならない | Step4 以降も継続確認 |
-| result payload 拡張 | `winner` / `end_reason` / `survival_seconds` が追加される | Step5/Step6 以降 |
+| result payload 拡張 | `survival_seconds` / `captured_at` / capture `photo_url` が追加される | 実装済み |
+| result winner / end_reason | `winner` / `end_reason` が追加される | Step5/Step6 以降 |
 | result 保存 | `game_results` / `player_results` に保存される | Step5/Step6 以降 |
 | MVP 外 UI 確認 | mission / chat / area shrink など未実装 UI が誤操作を誘導しない | Step4 以降 |
 | 鬼人数 UI max3 | frontend UI でも鬼人数が最大 3 人に制限される | Step4 以降 |

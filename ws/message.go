@@ -20,6 +20,7 @@ type OutgoingMessage struct {
 	Event          string             `json:"event"`
 	Message        string             `json:"message,omitempty"`
 	Players        []WaitingPlayerVal `json:"players,omitempty"`
+	HostUserID     string             `json:"host_user_id,omitempty"`
 	Role           *int               `json:"role,omitempty"`
 	TimeLimit      int                `json:"time_limit,omitempty"`
 	OniCount       int                `json:"oni_count,omitempty"`
@@ -63,6 +64,7 @@ type WaitingPlayerVal struct {
 	Name     string `json:"name"`
 	Color    string `json:"color"`
 	PhotoURL string `json:"photo_url,omitempty"`
+	IsHost   bool   `json:"is_host"`
 }
 
 // 位置情報のまとまり

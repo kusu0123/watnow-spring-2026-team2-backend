@@ -17,6 +17,7 @@ type Room struct {
 	AreaCenterLat  float64   `json:"area_center_lat"` // 追加：プレイエリア中心の緯度
 	AreaCenterLng  float64   `json:"area_center_lng"` // 追加：プレイエリア中心の経度
 	HasAreaCenter  bool      `json:"has_area_center"` // 追加：中心地点が設定済みか
+	HostUserID     string    `json:"host_user_id,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
 	Players        []Player  `gorm:"foreignKey:RoomID" json:"players,omitempty"`
 }

@@ -413,6 +413,41 @@ func TestUpdateColorRejectsInvalidColor(t *testing.T) {
 	assertErrorMessage(t, wsConn, "カラーを選択してください")
 }
 
+func TestUpdateColorRejectsDuplicateAndReservedBlack(t *testing.T) {
+	roomID := "duplicateUpdateColorRoom"
+	_, baseURL, cleanup := newTestServer(t, models.Room{
+		ID:        roomID,
+		Status:    0,
+		TimeLimit: 900,
+	})
+	defer cleanup()
+
+	wsConn1 := connectToRoom(t, baseURL, roomID)
+	defer wsConn1.Close()
+	wsConn2 := connectToRoom(t, baseURL, roomID)
+	defer wsConn2.Close()
+
+	sendJSON(t, wsConn1, `{"action":"join","user_id":"player1","name":"はるき","color":"#0000FF"}`)
+	if msg := readMessage(t, wsConn1); msg.Event != "waiting" {
+		t.Fatalf("想定外のイベント: %s", msg.Event)
+	}
+	sendJSON(t, wsConn2, `{"action":"join","user_id":"player2","name":"みな","color":"#FF00AA"}`)
+	readUntilEvent(t, wsConn1, "waiting")
+	if msg := readMessage(t, wsConn2); msg.Event != "waiting" {
+		t.Fatalf("想定外のイベント: %s", msg.Event)
+	}
+
+	duplicateJoinConn := connectToRoom(t, baseURL, roomID)
+	defer duplicateJoinConn.Close()
+	sendJSON(t, duplicateJoinConn, `{"action":"join","user_id":"player3","name":"そうた","color":"#FF00AA"}`)
+	assertErrorMessage(t, duplicateJoinConn, "このカラーはすでに使われています")
+
+	sendJSON(t, wsConn1, `{"action":"update_color","color":"#FF00AA"}`)
+	assertErrorMessage(t, wsConn1, "このカラーはすでに使われています")
+	sendJSON(t, wsConn1, `{"action":"update_color","color":"#000000"}`)
+	assertErrorMessage(t, wsConn1, "黒は鬼用のカラーです")
+}
+
 func TestUpdateColorReflectsNextActiveSync(t *testing.T) {
 	roomID := "activeUpdateColorRoom"
 	_, baseURL, cleanup := newTestServer(t, models.Room{
@@ -468,6 +503,92 @@ func TestUpdateColorReflectsNextActiveSync(t *testing.T) {
 		t.Fatalf("syncにplayer2が含まれていません: %+v", syncMsg.Locations)
 	}
 	assertLocationMeta(t, location, roomID, "player2", "みな", 0, false, "#00CC66")
+}
+
+func TestWaitingHostAssignedAndTransferredOnLeave(t *testing.T) {
+	roomID := "hostTransferRoom"
+	db, baseURL, cleanup := newTestServer(t, models.Room{
+		ID:        roomID,
+		Status:    0,
+		TimeLimit: 900,
+	})
+	defer cleanup()
+
+	hostConn := connectToRoom(t, baseURL, roomID)
+	guestConn := connectToRoom(t, baseURL, roomID)
+	defer guestConn.Close()
+
+	sendJSON(t, hostConn, `{"action":"join","user_id":"player1","name":"はるき"}`)
+	firstWaiting := readUntilEvent(t, hostConn, "waiting")
+	if firstWaiting.HostUserID != "player1" {
+		t.Fatalf("最初の参加者がhostになっていません: %+v", firstWaiting)
+	}
+	hostPlayer, ok := findWaitingPlayer(firstWaiting.Players, "player1")
+	if !ok || !hostPlayer.IsHost {
+		t.Fatalf("players[].is_hostが不正です: %+v", firstWaiting.Players)
+	}
+
+	sendJSON(t, guestConn, `{"action":"join","user_id":"player2","name":"みな"}`)
+	waitingForHost := readUntilEvent(t, hostConn, "waiting")
+	waitingForGuest := readUntilEvent(t, guestConn, "waiting")
+	if waitingForHost.HostUserID != "player1" || waitingForGuest.HostUserID != "player1" {
+		t.Fatalf("host_user_idが維持されていません: host=%+v guest=%+v", waitingForHost, waitingForGuest)
+	}
+
+	sendJSON(t, hostConn, `{"action":"leave"}`)
+	transferred := readUntilEvent(t, guestConn, "waiting")
+	if transferred.HostUserID != "player2" {
+		t.Fatalf("hostが移譲されていません: %+v", transferred)
+	}
+	guestPlayer, ok := findWaitingPlayer(transferred.Players, "player2")
+	if !ok || !guestPlayer.IsHost {
+		t.Fatalf("移譲後のis_hostが不正です: %+v", transferred.Players)
+	}
+
+	var room models.Room
+	if err := db.First(&room, "id = ?", roomID).Error; err != nil {
+		t.Fatalf("ルーム取得失敗: %v", err)
+	}
+	if room.HostUserID != "player2" {
+		t.Fatalf("DBのhost_user_idが移譲されていません: %+v", room)
+	}
+}
+
+func TestNonHostCannotStartOrStartRoulette(t *testing.T) {
+	roomID := "hostOnlyActionRoom"
+	_, baseURL, cleanup := newTestServer(t, models.Room{
+		ID:           roomID,
+		Status:       0,
+		TimeLimit:    120,
+		OniCount:     1,
+		SyncInterval: 30,
+		GracePeriod:  0,
+	})
+	defer cleanup()
+
+	hostConn := connectToRoom(t, baseURL, roomID)
+	defer hostConn.Close()
+	guestConn := connectToRoom(t, baseURL, roomID)
+	defer guestConn.Close()
+
+	sendJSON(t, hostConn, `{"action":"join","user_id":"player1","name":"はるき"}`)
+	if msg := readMessage(t, hostConn); msg.Event != "waiting" {
+		t.Fatalf("想定外のイベント: %s", msg.Event)
+	}
+	sendJSON(t, guestConn, `{"action":"join","user_id":"player2","name":"みな"}`)
+	readUntilEvent(t, hostConn, "waiting")
+	if msg := readMessage(t, guestConn); msg.Event != "waiting" {
+		t.Fatalf("想定外のイベント: %s", msg.Event)
+	}
+
+	sendJSON(t, guestConn, `{"action":"start_roulette"}`)
+	assertErrorMessage(t, guestConn, "ホストのみ実行できます")
+	sendJSON(t, guestConn, `{"action":"start","oni_users":["player1"]}`)
+	assertErrorMessage(t, guestConn, "ホストのみ実行できます")
+
+	sendJSON(t, hostConn, `{"action":"start_roulette"}`)
+	readUntilEvent(t, hostConn, "roulette_started")
+	readUntilEvent(t, guestConn, "roulette_started")
 }
 
 func TestStartRouletteBroadcastsToRoom(t *testing.T) {

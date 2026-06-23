@@ -58,6 +58,7 @@ type RoomState struct {
 	AreaCenterLat  float64
 	AreaCenterLng  float64
 	HasAreaCenter  bool
+	HostUserID     string
 	StartAt        time.Time
 	ActiveAt       time.Time
 	IsGameActive   bool
@@ -140,6 +141,7 @@ func (h *Hub) UpdateRoomSettingsFromModel(room models.Room) *RoomState {
 	roomState.AreaCenterLat = room.AreaCenterLat
 	roomState.AreaCenterLng = room.AreaCenterLng
 	roomState.HasAreaCenter = room.HasAreaCenter
+	roomState.HostUserID = room.HostUserID
 	return roomState
 }
 
@@ -216,6 +218,73 @@ func roomPlayerCount(db *gorm.DB, roomID string) (int64, error) {
 		return 0, err
 	}
 	return count, nil
+}
+
+func isReservedPlayerColor(color string) bool {
+	return strings.EqualFold(color, "#000000") || strings.EqualFold(color, "black")
+}
+
+func colorUsedByOtherPlayer(db *gorm.DB, roomID, userID, color string) (bool, error) {
+	var players []models.Player
+	if err := db.Where("room_id = ?", roomID).Find(&players).Error; err != nil {
+		return false, err
+	}
+	for _, player := range players {
+		if player.UserID != userID && strings.EqualFold(player.Color, color) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func syncRoomHost(room *RoomState, hostUserID string) {
+	room.mu.Lock()
+	room.HostUserID = hostUserID
+	room.mu.Unlock()
+}
+
+func ensureRoomHost(db *gorm.DB, roomID, fallbackUserID string) (string, error) {
+	var room models.Room
+	if err := db.First(&room, "id = ?", roomID).Error; err != nil {
+		return "", err
+	}
+	if room.HostUserID != "" || fallbackUserID == "" {
+		return room.HostUserID, nil
+	}
+	if err := db.Model(&models.Room{}).Where("id = ?", roomID).Update("host_user_id", fallbackUserID).Error; err != nil {
+		return "", err
+	}
+	return fallbackUserID, nil
+}
+
+func transferRoomHostIfNeeded(db *gorm.DB, roomID, leavingUserID string) (string, error) {
+	var room models.Room
+	if err := db.First(&room, "id = ?", roomID).Error; err != nil {
+		return "", err
+	}
+	if room.HostUserID == "" || room.HostUserID != leavingUserID {
+		return room.HostUserID, nil
+	}
+
+	var nextPlayer models.Player
+	err := db.Where("room_id = ?", roomID).Order("user_id ASC").First(&nextPlayer).Error
+	newHostUserID := ""
+	if err == nil {
+		newHostUserID = nextPlayer.UserID
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return "", err
+	}
+
+	if err := db.Model(&models.Room{}).Where("id = ?", roomID).Update("host_user_id", newHostUserID).Error; err != nil {
+		return "", err
+	}
+	return newHostUserID, nil
+}
+
+func (room *RoomState) isHost(userID string) bool {
+	room.mu.RLock()
+	defer room.mu.RUnlock()
+	return room.HostUserID == "" || room.HostUserID == userID
 }
 
 func oniUsersForRoom(db *gorm.DB, roomID string) ([]string, error) {
@@ -362,11 +431,16 @@ func (h *Hub) Unregister(roomID string, client *Client, db *gorm.DB) {
 	if !leftExplicitly && status == 0 && userID != "" && db != nil {
 		if err := db.Where("room_id = ? AND user_id = ?", roomID, userID).Delete(&models.Player{}).Error; err != nil {
 			log.Printf("[Error] Room: %s | User: %s | waiting切断後のプレイヤー削除に失敗しました: %v\n", roomID, userID, err)
-		} else if !isEmpty {
-			room.Broadcast(OutgoingMessage{
-				Event:   "waiting",
-				Players: room.waitingPlayers(),
-			})
+		} else {
+			newHostUserID, err := transferRoomHostIfNeeded(db, roomID, userID)
+			if err != nil {
+				log.Printf("[Error] Room: %s | User: %s | waiting切断後のhost移譲に失敗しました: %v\n", roomID, userID, err)
+			} else {
+				syncRoomHost(room, newHostUserID)
+			}
+			if !isEmpty {
+				room.Broadcast(room.waitingMessage())
+			}
 		}
 	}
 
@@ -514,10 +588,26 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 					sendError(client, "カラーの形式が不正です（例: #FF0000）")
 					continue
 				}
+				if isReservedPlayerColor(normalizedColor) {
+					sendError(client, "黒は鬼用のカラーです")
+					continue
+				}
 				msg.Color = normalizedColor
 			}
 
 			status := roomStatus(room)
+			if status == 0 && msg.Color != "" {
+				used, err := colorUsedByOtherPlayer(db, roomID, msg.UserID, msg.Color)
+				if err != nil {
+					sendError(client, "プレイヤーカラーの確認に失敗しました")
+					continue
+				}
+				if used {
+					sendError(client, "このカラーはすでに使われています")
+					continue
+				}
+			}
+
 			var player models.Player
 			err := db.Where("room_id = ? AND user_id = ?", roomID, msg.UserID).First(&player).Error
 			playerExists := err == nil
@@ -586,10 +676,13 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 
 			switch status {
 			case 0:
-				room.Broadcast(OutgoingMessage{
-					Event:   "waiting",
-					Players: room.waitingPlayers(),
-				})
+				hostUserID, err := ensureRoomHost(db, roomID, player.UserID)
+				if err != nil {
+					sendError(client, "ホスト情報の保存に失敗しました")
+					continue
+				}
+				syncRoomHost(room, hostUserID)
+				room.Broadcast(room.waitingMessage())
 				sendRoomSettingsToClient(roomID, client, room, player.UserID)
 			case 1:
 				sendRoomSettingsToClient(roomID, client, room, player.UserID)
@@ -646,6 +739,21 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				sendError(client, "鬼のカラーは変更できません")
 				continue
 			}
+			if isReservedPlayerColor(normalizedColor) {
+				sendError(client, "黒は鬼用のカラーです")
+				continue
+			}
+			if !strings.EqualFold(player.Color, normalizedColor) {
+				used, err := colorUsedByOtherPlayer(db, roomID, userID, normalizedColor)
+				if err != nil {
+					sendError(client, "プレイヤーカラーの確認に失敗しました")
+					continue
+				}
+				if used {
+					sendError(client, "このカラーはすでに使われています")
+					continue
+				}
+			}
 			if err := db.Model(&models.Player{}).Where("room_id = ? AND user_id = ?", roomID, userID).Update("color", normalizedColor).Error; err != nil {
 				sendError(client, "プレイヤーカラーの保存に失敗しました")
 				continue
@@ -660,10 +768,7 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 			}
 
 			if roomStatus(room) == 0 {
-				room.Broadcast(OutgoingMessage{
-					Event:   "waiting",
-					Players: room.waitingPlayers(),
-				})
+				room.Broadcast(room.waitingMessage())
 			}
 
 		case "start_roulette":
@@ -675,6 +780,10 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				sendError(client, "先に入室してください")
 				continue
 			}
+			if !room.isHost(userID) {
+				sendError(client, "ホストのみ実行できます")
+				continue
+			}
 			if roomStatus(room) != 0 {
 				sendError(client, "ルーレット開始は待機中のみ実行できます")
 				continue
@@ -682,6 +791,19 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 			room.Broadcast(OutgoingMessage{Event: "roulette_started"})
 
 		case "start":
+			client.mu.Lock()
+			startUserID := client.UserID
+			startPlayerID := client.PlayerID
+			client.mu.Unlock()
+			if startUserID == "" || startPlayerID == "" {
+				sendError(client, "先に入室してください")
+				continue
+			}
+			if !room.isHost(startUserID) {
+				sendError(client, "ホストのみ実行できます")
+				continue
+			}
+
 			room.mu.Lock()
 			if room.Status != 0 || room.IsGMLoopActive {
 				room.mu.Unlock()
@@ -909,10 +1031,7 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				c.mu.Unlock()
 			}
 
-			room.Broadcast(OutgoingMessage{
-				Event:   "waiting",
-				Players: room.waitingPlayers(),
-			})
+			room.Broadcast(room.waitingMessage())
 
 		case "leave":
 			client.mu.Lock()
@@ -929,6 +1048,17 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 					sendError(client, "プレイヤー情報の削除に失敗しました")
 					continue
 				}
+				if status == 0 {
+					newHostUserID, err := transferRoomHostIfNeeded(db, roomID, userID)
+					if err != nil {
+						client.mu.Lock()
+						client.LeftExplicitly = false
+						client.mu.Unlock()
+						sendError(client, "ホスト移譲に失敗しました")
+						continue
+					}
+					syncRoomHost(room, newHostUserID)
+				}
 			}
 
 			removedRoom, leaveStatus, _ := GameHub.removeClientFromRoom(roomID, client)
@@ -939,10 +1069,7 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 			if removedRoom != nil {
 				switch leaveStatus {
 				case 0:
-					removedRoom.Broadcast(OutgoingMessage{
-						Event:   "waiting",
-						Players: removedRoom.waitingPlayers(),
-					})
+					removedRoom.Broadcast(removedRoom.waitingMessage())
 				case 2:
 					resultMessage, err := removedRoom.resultMessage(roomID, db)
 					if err != nil {

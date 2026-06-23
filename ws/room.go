@@ -138,6 +138,7 @@ func snapshotClient(client *Client) syncPlayerSnapshot {
 func (room *RoomState) waitingPlayers() []WaitingPlayerVal {
 	clients := room.clientList()
 	players := make([]WaitingPlayerVal, 0, len(clients))
+	hostUserID := room.hostUserID()
 
 	for _, client := range clients {
 		client.mu.Lock()
@@ -146,6 +147,7 @@ func (room *RoomState) waitingPlayers() []WaitingPlayerVal {
 			Name:     client.Name,
 			Color:    client.Color,
 			PhotoURL: client.PhotoURL,
+			IsHost:   client.UserID != "" && client.UserID == hostUserID,
 		}
 		client.mu.Unlock()
 
@@ -159,6 +161,20 @@ func (room *RoomState) waitingPlayers() []WaitingPlayerVal {
 	})
 
 	return players
+}
+
+func (room *RoomState) hostUserID() string {
+	room.mu.RLock()
+	defer room.mu.RUnlock()
+	return room.HostUserID
+}
+
+func (room *RoomState) waitingMessage() OutgoingMessage {
+	return OutgoingMessage{
+		Event:      "waiting",
+		HostUserID: room.hostUserID(),
+		Players:    room.waitingPlayers(),
+	}
 }
 
 func locationForSnapshot(player syncPlayerSnapshot, includeCoords bool) LocationVal {
