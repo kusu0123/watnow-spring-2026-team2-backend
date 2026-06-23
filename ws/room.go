@@ -67,13 +67,14 @@ func (room *RoomState) roomSettingsMessage() RoomSettingsMessage {
 	}
 
 	return RoomSettingsMessage{
-		Event:        "room_settings",
-		TimeLimit:    timeLimit,
-		OniCount:     room.OniCount,
-		AreaSize:     room.AreaSize,
-		SyncInterval: syncInterval,
-		GracePeriod:  gracePeriod,
-		AreaCenter:   areaCenter,
+		Event:          "room_settings",
+		TimeLimit:      timeLimit,
+		OniCount:       room.OniCount,
+		AreaSize:       room.AreaSize,
+		SyncInterval:   syncInterval,
+		GracePeriod:    gracePeriod,
+		MissionEnabled: room.MissionEnabled,
+		AreaCenter:     areaCenter,
 	}
 }
 
@@ -107,6 +108,7 @@ type syncPlayerSnapshot struct {
 	HasLocation bool
 	Color       string
 	PhotoURL    string
+	CapturedAt  *time.Time
 }
 
 func snapshotClient(client *Client) syncPlayerSnapshot {
@@ -129,12 +131,14 @@ func snapshotClient(client *Client) syncPlayerSnapshot {
 		HasLocation: client.HasLocation,
 		Color:       client.Color,
 		PhotoURL:    client.PhotoURL,
+		CapturedAt:  client.CapturedAt,
 	}
 }
 
 func (room *RoomState) waitingPlayers() []WaitingPlayerVal {
 	clients := room.clientList()
 	players := make([]WaitingPlayerVal, 0, len(clients))
+	hostUserID := room.hostUserID()
 
 	for _, client := range clients {
 		client.mu.Lock()
@@ -143,6 +147,7 @@ func (room *RoomState) waitingPlayers() []WaitingPlayerVal {
 			Name:     client.Name,
 			Color:    client.Color,
 			PhotoURL: client.PhotoURL,
+			IsHost:   client.UserID != "" && client.UserID == hostUserID,
 		}
 		client.mu.Unlock()
 
@@ -156,6 +161,20 @@ func (room *RoomState) waitingPlayers() []WaitingPlayerVal {
 	})
 
 	return players
+}
+
+func (room *RoomState) hostUserID() string {
+	room.mu.RLock()
+	defer room.mu.RUnlock()
+	return room.HostUserID
+}
+
+func (room *RoomState) waitingMessage() OutgoingMessage {
+	return OutgoingMessage{
+		Event:      "waiting",
+		HostUserID: room.hostUserID(),
+		Players:    room.waitingPlayers(),
+	}
 }
 
 func locationForSnapshot(player syncPlayerSnapshot, includeCoords bool) LocationVal {
@@ -227,10 +246,34 @@ func (room *RoomState) resultMessage(roomID string, db *gorm.DB) (OutgoingMessag
 		return OutgoingMessage{}, err
 	}
 
-	return resultMessageFromPlayers(players), nil
+	activeAt, endedAt := room.resultTiming()
+	return resultMessageFromPlayers(players, activeAt, endedAt), nil
 }
 
-func resultMessageFromPlayers(players []models.Player) OutgoingMessage {
+func (room *RoomState) resultTiming() (time.Time, time.Time) {
+	room.mu.RLock()
+	activeAt := room.ActiveAt
+	timeLimit := room.TimeLimit
+	room.mu.RUnlock()
+
+	endedAt := time.Now()
+	if !activeAt.IsZero() && timeLimit > 0 {
+		limitEnd := activeAt.Add(time.Duration(timeLimit) * time.Second)
+		if endedAt.After(limitEnd) {
+			endedAt = limitEnd
+		}
+	}
+	return activeAt, endedAt
+}
+
+func survivalSeconds(activeAt, endedAt time.Time) int {
+	if activeAt.IsZero() || endedAt.Before(activeAt) {
+		return 0
+	}
+	return int(endedAt.Sub(activeAt).Seconds())
+}
+
+func resultMessageFromPlayers(players []models.Player, activeAt, endedAt time.Time) OutgoingMessage {
 	results := make([]ResultVal, 0, len(players))
 	var survivors []string
 
@@ -243,8 +286,18 @@ func resultMessageFromPlayers(players []models.Player) OutgoingMessage {
 			PhotoURL: player.PhotoURL,
 		}
 
-		if result.Role == 0 && !result.IsCaught {
-			survivors = append(survivors, result.UserID)
+		if result.Role == 0 {
+			if result.IsCaught {
+				if player.CapturedAt != nil {
+					result.CapturedAt = player.CapturedAt.Format(time.RFC3339)
+					seconds := survivalSeconds(activeAt, *player.CapturedAt)
+					result.SurvivalSeconds = &seconds
+				}
+			} else {
+				survivors = append(survivors, result.UserID)
+				seconds := survivalSeconds(activeAt, endedAt)
+				result.SurvivalSeconds = &seconds
+			}
 		}
 		results = append(results, result)
 	}
@@ -267,12 +320,13 @@ func (room *RoomState) resultMessageFromClients() OutgoingMessage {
 			continue
 		}
 		players = append(players, models.Player{
-			ID:       snapshot.PlayerID,
-			UserID:   snapshot.UserID,
-			Name:     snapshot.Name,
-			Role:     snapshot.Role,
-			IsCaught: snapshot.IsCaught,
-			PhotoURL: snapshot.PhotoURL,
+			ID:         snapshot.PlayerID,
+			UserID:     snapshot.UserID,
+			Name:       snapshot.Name,
+			Role:       snapshot.Role,
+			IsCaught:   snapshot.IsCaught,
+			PhotoURL:   snapshot.PhotoURL,
+			CapturedAt: snapshot.CapturedAt,
 		})
 	}
 
@@ -280,7 +334,8 @@ func (room *RoomState) resultMessageFromClients() OutgoingMessage {
 		return players[i].UserID < players[j].UserID
 	})
 
-	return resultMessageFromPlayers(players)
+	activeAt, endedAt := room.resultTiming()
+	return resultMessageFromPlayers(players, activeAt, endedAt)
 }
 
 func (room *RoomState) resultMessageBestEffort(roomID string, db *gorm.DB) OutgoingMessage {

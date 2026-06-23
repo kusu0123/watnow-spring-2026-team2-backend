@@ -17,37 +17,40 @@ type IncomingMessage struct {
 
 // フロントエンドへ送信するデータ
 type OutgoingMessage struct {
-	Event        string             `json:"event"`
-	Message      string             `json:"message,omitempty"`
-	Players      []WaitingPlayerVal `json:"players,omitempty"`
-	Role         *int               `json:"role,omitempty"`
-	TimeLimit    int                `json:"time_limit,omitempty"`
-	OniCount     int                `json:"oni_count,omitempty"`
-	AreaSize     string             `json:"area_size,omitempty"`
-	SyncInterval int                `json:"sync_interval,omitempty"`
-	GracePeriod  int                `json:"grace_period,omitempty"`
-	AreaCenter   *AreaCenterVal     `json:"area_center,omitempty"`
-	OniUsers     []string           `json:"oni_users,omitempty"`
-	TargetID     string             `json:"target_id,omitempty"`
-	AttackerName string             `json:"attacker_name,omitempty"`
-	Approved     bool               `json:"approved,omitempty"`
-	PhotoURL     string             `json:"photo_url,omitempty"`
-	RequestID    string             `json:"request_id,omitempty"`
-	AttackerID   string             `json:"attacker_id,omitempty"`
-	ExpiresAt    string             `json:"expires_at,omitempty"`
-	Locations    []LocationVal      `json:"locations,omitempty"`
-	Survivors    []string           `json:"survivors,omitempty"`
-	Results      []ResultVal        `json:"results,omitempty"`
+	Event          string             `json:"event"`
+	Message        string             `json:"message,omitempty"`
+	Players        []WaitingPlayerVal `json:"players,omitempty"`
+	HostUserID     string             `json:"host_user_id,omitempty"`
+	Role           *int               `json:"role,omitempty"`
+	TimeLimit      int                `json:"time_limit,omitempty"`
+	OniCount       int                `json:"oni_count,omitempty"`
+	AreaSize       string             `json:"area_size,omitempty"`
+	SyncInterval   int                `json:"sync_interval,omitempty"`
+	GracePeriod    int                `json:"grace_period,omitempty"`
+	MissionEnabled bool               `json:"mission_enabled"`
+	AreaCenter     *AreaCenterVal     `json:"area_center,omitempty"`
+	OniUsers       []string           `json:"oni_users,omitempty"`
+	TargetID       string             `json:"target_id,omitempty"`
+	AttackerName   string             `json:"attacker_name,omitempty"`
+	Approved       bool               `json:"approved,omitempty"`
+	PhotoURL       string             `json:"photo_url,omitempty"`
+	RequestID      string             `json:"request_id,omitempty"`
+	AttackerID     string             `json:"attacker_id,omitempty"`
+	ExpiresAt      string             `json:"expires_at,omitempty"`
+	Locations      []LocationVal      `json:"locations,omitempty"`
+	Survivors      []string           `json:"survivors,omitempty"`
+	Results        []ResultVal        `json:"results,omitempty"`
 }
 
 type RoomSettingsMessage struct {
-	Event        string         `json:"event"`
-	TimeLimit    int            `json:"time_limit"`
-	OniCount     int            `json:"oni_count"`
-	AreaSize     string         `json:"area_size"`
-	SyncInterval int            `json:"sync_interval"`
-	GracePeriod  int            `json:"grace_period"`
-	AreaCenter   *AreaCenterVal `json:"area_center"`
+	Event          string         `json:"event"`
+	TimeLimit      int            `json:"time_limit"`
+	OniCount       int            `json:"oni_count"`
+	AreaSize       string         `json:"area_size"`
+	SyncInterval   int            `json:"sync_interval"`
+	GracePeriod    int            `json:"grace_period"`
+	MissionEnabled bool           `json:"mission_enabled"`
+	AreaCenter     *AreaCenterVal `json:"area_center"`
 }
 
 type AreaCenterVal struct {
@@ -61,6 +64,7 @@ type WaitingPlayerVal struct {
 	Name     string `json:"name"`
 	Color    string `json:"color"`
 	PhotoURL string `json:"photo_url,omitempty"`
+	IsHost   bool   `json:"is_host"`
 }
 
 // 位置情報のまとまり
@@ -78,9 +82,11 @@ type LocationVal struct {
 
 // 結果発表用のまとまり
 type ResultVal struct {
-	UserID   string `json:"user_id"`
-	Name     string `json:"name"`
-	Role     int    `json:"role"`
-	IsCaught bool   `json:"is_caught"`
-	PhotoURL string `json:"photo_url,omitempty"`
+	UserID          string `json:"user_id"`
+	Name            string `json:"name"`
+	Role            int    `json:"role"`
+	IsCaught        bool   `json:"is_caught"`
+	PhotoURL        string `json:"photo_url,omitempty"`
+	CapturedAt      string `json:"captured_at,omitempty"`
+	SurvivalSeconds *int   `json:"survival_seconds,omitempty"`
 }

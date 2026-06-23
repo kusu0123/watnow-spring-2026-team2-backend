@@ -1,5 +1,7 @@
 package models
 
+import "time"
+
 type Player struct {
 	ID          string `gorm:"primaryKey"`
 	RoomID      string `gorm:"index:idx_players_room_user,unique"`
@@ -12,4 +14,5 @@ type Player struct {
 	HasLocation bool    `gorm:"default:false"`
 	Color       string
 	PhotoURL    string // Supabase Storageの画像URLを保存するポケット
+	CapturedAt  *time.Time
 }

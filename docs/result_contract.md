@@ -1,11 +1,11 @@
 # Result Contract
 
-この資料は、Step5/Step6 以降で扱う result payload 拡張と result 保存の契約案です。現行 backend は `result` event の `survivors` / `results` を返しますが、`winner`、`end_reason`、`survival_seconds`、result DB 保存は未実装です。
+この資料は、result payload 拡張と result 保存の契約案です。現行 backend は `result` event の `survivors` / `results` に加えて、逃走者向けの `survival_seconds`、捕獲済み逃走者向けの `captured_at` / `photo_url` を返します。`winner`、`end_reason`、result DB 保存は未実装です。
 
 ## 方針
 
 - 既存の `result` event の `survivors` / `results` は維持します。
-- 追加 field で `winner`、`end_reason`、`survival_seconds` などを拡張します。
+- 追加 field で `survival_seconds`、`captured_at` などを拡張します。`winner` / `end_reason` は今後の候補です。
 - frontend は追加 field があれば優先し、なければ現行の `survivors` / `results` から推定表示する fallback を持ちます。
 - result DB 保存は Step5/Step6 以降の提案です。現行 model には `game_results` / `player_results` は未実装です。
 - `photo_url` は backend 側の player field として存在するため、result 表示用にも `photo_url` を使います。
@@ -28,6 +28,15 @@ backend -> clients
       "is_caught": false,
       "survival_seconds": 600,
       "photo_url": null
+    },
+    {
+      "user_id": "user-2",
+      "name": "caught runner",
+      "role": 0,
+      "is_caught": true,
+      "captured_at": "2026-06-24T10:00:00+09:00",
+      "survival_seconds": 120,
+      "photo_url": "https://..."
     }
   ]
 }
@@ -38,12 +47,13 @@ backend -> clients
 | field | 状態 | 内容 |
 | --- | --- | --- |
 | `event` | 実装済み | `result` |
-| `winner` | Step5/Step6 以降の提案 | `oni` / `runner` |
-| `end_reason` | Step5/Step6 以降の提案 | 終了理由 |
+| `winner` | 未実装 | `oni` / `runner` |
+| `end_reason` | 未実装 | 終了理由 |
 | `survivors` | 実装済み | 最後まで捕まらなかった逃走者の `user_id` |
 | `results[]` | 実装済み | 逃走者と鬼を含むプレイヤー結果 |
-| `results[].survival_seconds` | Step5/Step6 以降の提案 | 逃走者の生存秒数。鬼は `0` または省略を Step5/Step6 で確定 |
-| `results[].photo_url` | 実装済み field 由来 | 未設定時は省略または `null` として扱う |
+| `results[].survival_seconds` | 実装済み | 逃走者の生存秒数。鬼は省略 |
+| `results[].captured_at` | 実装済み | 捕獲済み逃走者の捕獲成立時刻 |
+| `results[].photo_url` | 実装済み | 捕獲済み逃走者は capture 写真URL。未設定時は省略または `null` として扱う |
 
 ## winner
 
@@ -97,7 +107,7 @@ Step5/Step6 以降の提案であり、現行 model には未実装です。
 ## 既存互換
 
 - 現行 frontend は `survivors` と `results[].is_caught` / `results[].role` から勝敗を推定できます。
-- Step5/Step6 以降で `winner` と `end_reason` が追加されたら、frontend は追加 field を優先します。
+- 今後 `winner` と `end_reason` が追加されたら、frontend は追加 field を優先します。
 - 追加 field は optional として扱い、古い backend payload でも result 画面が壊れないようにします。
 - `results[]` の基本 shape は維持し、既存画面の参照先を壊さない方針です。
 

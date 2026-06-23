@@ -120,6 +120,9 @@ Content-Type: application/json
 | --- | --- | --- | --- | --- |
 | action | `join` | frontend -> backend | 実装済み | 入室、再接続、待機中の名前・色更新 |
 | event | `waiting` | backend -> clients | 実装済み | 待機中参加者一覧 |
+| action | `update_color` | frontend -> backend | 実装済み | 待機中/ゲーム中の自分の色更新 |
+| action | `start_roulette` | frontend -> backend | 実装済み | host がルーレット表示開始を通知 |
+| event | `roulette_started` | backend -> clients | 実装済み | guest 側のルーレット画面遷移 |
 | action | `start` | frontend -> backend | 実装済み | 役割指定とゲーム開始 |
 | event | `start` | backend -> clients | 実装済み | 各 viewer への役割通知 |
 | event | `game_active` | backend -> clients | 実装済み | 本編開始通知 |
@@ -154,26 +157,48 @@ Content-Type: application/json
 - 新規参加は待機中のみ許可されます。ゲーム中またはリザルト中の新規参加は `error` になります。
 - ゲーム中またはリザルト中でも、既存の `room_id + user_id` の復帰は許可されます。
 - 参加人数は最大 15 人です。
-- `name` は 1 文字以上 20 文字以下です。
-- `color` は `#` から始まる 7 文字の形式を送ってください。
+- `name` は前後空白を除いて 1 文字以上 12 文字以下です。日本語も 1 文字として数えます。
+- `color` は `#RRGGBB` 形式です。`#000000` は鬼用のため、逃走者/待機中プレイヤーは使えません。
 
 受信イベント:
 
 ```json
 {
   "event": "waiting",
+  "host_user_id": "user-1",
   "players": [
     {
       "user_id": "user-1",
       "name": "player name",
       "color": "#FF0000",
-      "photo_url": null
+      "photo_url": null,
+      "is_host": true
     }
   ]
 }
 ```
 
-`players` は Step3 後、文字列配列ではなく参加者 object の配列です。`photo_url` は backend 側の field として存在しますが、未設定時は省略または `null` として扱ってください。frontend 型との最終整合は Step4 以降で整理予定です。
+`players` は Step3 後、文字列配列ではなく参加者 object の配列です。`host_user_id` と `players[].is_host` で現在のhostを判定できます。待機中にhostが退出した場合は、残っている参加者へhostが移譲されます。`photo_url` は未設定時は省略または `null` として扱ってください。
+
+### update_color
+
+自分の色を更新します。
+
+```json
+{
+  "action": "update_color",
+  "color": "#00AAFF"
+}
+```
+
+要点:
+
+- `join` 後に送信します。
+- `color` は `#RRGGBB` 形式です。
+- 同じ room の他 player が使っている色は拒否されます。
+- `#000000` は鬼用として予約されています。
+- 待機中は更新後に `waiting` が全員へ届きます。
+- ゲーム中はメモリとDBが更新され、次回 `sync` に反映されます。
 
 ### start
 
@@ -195,6 +220,7 @@ Content-Type: application/json
 - `oni_count` と `oni_users` の人数は一致させてください。
 - `oni_users` が空、未指定、重複、未参加の `user_id` を含む場合は開始されず、送信元に `error` が届きます。
 - 鬼に指定されたプレイヤーの `color` はサーバー側で `black` に上書きされます。
+- `start` はhostのみ実行できます。
 
 受信イベント:
 
@@ -218,6 +244,24 @@ Content-Type: application/json
 ```
 
 フロント側では、役割表示やカウントダウンは `start`、位置同期や確保操作の本格開始は `game_active` を基準にしてください。
+
+### start_roulette
+
+host がルーレット画面へ遷移したことを room 全体へ通知します。役割決定やゲーム開始は行いません。
+
+```json
+{
+  "action": "start_roulette"
+}
+```
+
+成功すると全員へ以下が届きます。
+
+```json
+{
+  "event": "roulette_started"
+}
+```
 
 ### move
 
@@ -344,6 +388,7 @@ Step3 時点の実装では `request_id` はまだありません。Step4 以降
   "area_size": "500m",
   "sync_interval": 180,
   "grace_period": 120,
+  "mission_enabled": false,
   "area_center": {
     "lat": 34.0,
     "lng": 135.0
@@ -401,12 +446,21 @@ Step3 時点の実装では `request_id` はまだありません。Step4 以降
       "role": 1,
       "is_caught": false,
       "photo_url": null
+    },
+    {
+      "user_id": "user-002",
+      "name": "みな",
+      "role": 0,
+      "is_caught": true,
+      "photo_url": "https://...",
+      "captured_at": "2026-06-24T10:00:00+09:00",
+      "survival_seconds": 120
     }
   ]
 }
 ```
 
-`survivors` には最後まで捕まらなかった逃走者の `user_id` が入ります。全員捕獲時は空配列です。`results` には逃走者と鬼の両方が含まれます。
+`survivors` には最後まで捕まらなかった逃走者の `user_id` が入ります。全員捕獲時は空配列です。`results` には逃走者と鬼の両方が含まれます。逃走者には `survival_seconds` が含まれます。捕獲済み逃走者には `captured_at` と capture 写真の `photo_url` も含まれます。鬼の `survival_seconds` は省略されます。
 
 ### error
 

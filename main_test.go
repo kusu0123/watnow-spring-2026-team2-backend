@@ -242,6 +242,7 @@ func TestPutRoomSettingsBroadcastsAndSavesAreaCenter(t *testing.T) {
 		"area_size": "500m",
 		"sync_interval": 180,
 		"grace_period": 120,
+		"mission_enabled": true,
 		"area_center": {"lat": 34.0, "lng": 135.0}
 	}`)
 
@@ -249,10 +250,16 @@ func TestPutRoomSettingsBroadcastsAndSavesAreaCenter(t *testing.T) {
 	settings2 := readHTTPTestUntilEvent(t, wsConn2, "room_settings")
 	assertHTTPTestRoomSettings(t, settings1, 900, 1, "500m", 180, 120, 34.0, 135.0)
 	assertHTTPTestRoomSettings(t, settings2, 900, 1, "500m", 180, 120, 34.0, 135.0)
+	if !settings1.MissionEnabled || !settings2.MissionEnabled {
+		t.Fatalf("mission_enabledがbroadcastされていません: settings1=%+v settings2=%+v", settings1, settings2)
+	}
 
 	var savedRoom models.Room
 	if err := db.First(&savedRoom, "id = ?", roomID).Error; err != nil {
 		t.Fatalf("ルーム取得失敗: %v", err)
+	}
+	if !savedRoom.MissionEnabled {
+		t.Fatalf("DBにmission_enabledが保存されていません: %+v", savedRoom)
 	}
 	if !savedRoom.HasAreaCenter || math.Abs(savedRoom.AreaCenterLat-34.0) > 0.000001 || math.Abs(savedRoom.AreaCenterLng-135.0) > 0.000001 {
 		t.Fatalf("DBに保存されたarea_centerが不正です: %+v", savedRoom)
@@ -260,14 +267,18 @@ func TestPutRoomSettingsBroadcastsAndSavesAreaCenter(t *testing.T) {
 
 	roomState := ws.GameHub.GetOrCreateRoom(roomID)
 	stateSettings := roomState.RoomSettingsMessage()
+	if !stateSettings.MissionEnabled {
+		t.Fatalf("RoomStateにmission_enabledが反映されていません: %+v", stateSettings)
+	}
 	assertHTTPTestRoomSettings(t, ws.OutgoingMessage{
-		Event:        stateSettings.Event,
-		TimeLimit:    stateSettings.TimeLimit,
-		OniCount:     stateSettings.OniCount,
-		AreaSize:     stateSettings.AreaSize,
-		SyncInterval: stateSettings.SyncInterval,
-		GracePeriod:  stateSettings.GracePeriod,
-		AreaCenter:   stateSettings.AreaCenter,
+		Event:          stateSettings.Event,
+		TimeLimit:      stateSettings.TimeLimit,
+		OniCount:       stateSettings.OniCount,
+		AreaSize:       stateSettings.AreaSize,
+		SyncInterval:   stateSettings.SyncInterval,
+		GracePeriod:    stateSettings.GracePeriod,
+		MissionEnabled: stateSettings.MissionEnabled,
+		AreaCenter:     stateSettings.AreaCenter,
 	}, 900, 1, "500m", 180, 120, 34.0, 135.0)
 }
 
@@ -353,6 +364,10 @@ func TestPutRoomSettingsRejectsInvalidStep3Values(t *testing.T) {
 		{
 			name: "invalidGracePeriod",
 			body: `{"time_limit":900,"oni_count":1,"area_size":"500m","sync_interval":180,"grace_period":30}`,
+		},
+		{
+			name: "invalidMissionEnabledType",
+			body: `{"time_limit":900,"oni_count":1,"area_size":"500m","sync_interval":180,"grace_period":120,"mission_enabled":"yes"}`,
 		},
 	}
 
