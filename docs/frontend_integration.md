@@ -127,8 +127,14 @@ Content-Type: application/json
 | action | `join` | frontend -> backend | 実装済み | 入室、再接続、待機中の名前・色更新 |
 | event | `waiting` | backend -> clients | 実装済み | 待機中参加者一覧 |
 | action | `update_color` | frontend -> backend | 実装済み | 待機中/ゲーム中の自分の色更新 |
-| action | `start_roulette` | frontend -> backend | 実装済み | host がルーレット開始を通知 |
-| event | `roulette_started` | backend -> clients | 実装済み | roulette 表示順と確定鬼を同期 |
+| action | `prepare_roulette` | frontend -> backend | 実装済み | host がルーレット画面への遷移を開始 |
+| event | `roulette_ready` | backend -> clients | 実装済み | roulette session と表示順を同期 |
+| action | `roulette_start` | frontend -> backend | 実装済み | host がルーレット回転開始を指示 |
+| event | `roulette_spin_started` | backend -> clients | 実装済み | 全員の roulette animation 開始を同期 |
+| action | `roulette_stop` | frontend -> backend | 実装済み | host がルーレット停止を指示 |
+| event | `roulette_spin_stopped` | backend -> clients | 実装済み | Stop 時に backend が決めた鬼を同期 |
+| action | `roulette_reset` | frontend -> backend | 実装済み | host が pending 鬼を消して ready に戻す |
+| action | `start_roulette` | frontend -> backend | 互換 alias | `prepare_roulette` と同じ。鬼は決めない |
 | action | `start` | frontend -> backend | 実装済み | 役割指定とゲーム開始 |
 | event | `start` | backend -> clients | 実装済み | 各 viewer への役割通知 |
 | event | `game_active` | backend -> clients | 実装済み | 本編開始通知 |
@@ -222,7 +228,7 @@ Content-Type: application/json
 要点:
 
 - `oni_users` は鬼にする参加済み `user_id` の配列です。
-- 直前に `start_roulette` が成功している場合、backend は `roulette_started.selected_oni_user_ids` を優先して実際の鬼にします。この場合、`start` で送った `oni_users` とroulette結果はズレません。
+- 直前に `roulette_stop` が成功している場合、backend は `roulette_spin_stopped.selected_oni_user_ids` を pending 鬼として保持し、`start` ではそれを実際の鬼にします。この場合、`start` で送った `oni_users` より Stop 結果が優先されます。
 - 開始には 2 人以上の参加者が必要です。
 - `oni_users` は 1 から 3 人で、重複はできません。
 - 全員を鬼にすることはできません。
@@ -254,13 +260,17 @@ Content-Type: application/json
 
 フロント側では、役割表示やカウントダウンは `start`、位置同期や確保操作の本格開始は `game_active` を基準にしてください。
 
-### start_roulette
+### roulette flow
 
-host がルーレット開始ボタンを押したときに送ります。この時点で backend が鬼を確定し、次の `start` では同じ `user_id` を実際の role に使います。ゲーム開始自体はまだ行いません。
+ルーレットは backend が source of truth です。frontend は local random を最終結果にせず、`roulette_spin_stopped.selected_oni_user_ids` を停止結果として使ってください。
+
+#### prepare_roulette
+
+host がルーレット画面へ進めるときに送ります。この時点では鬼を決めません。
 
 ```json
 {
-  "action": "start_roulette"
+  "action": "prepare_roulette"
 }
 ```
 
@@ -268,20 +278,91 @@ host がルーレット開始ボタンを押したときに送ります。この
 
 ```json
 {
-  "event": "roulette_started",
+  "event": "roulette_ready",
+  "roulette_session_id": "session-id",
+  "roulette_order": ["user-001", "user-002"]
+}
+```
+
+`start_roulette` は互換 alias として `prepare_roulette` と同じ扱いです。旧仕様と違い、`start_roulette` / `roulette_ready` の時点では `selected_oni_user_ids` は含まれません。
+
+#### roulette_start
+
+host が Start を押したときに送ります。この時点でも鬼は決めません。
+
+```json
+{
+  "action": "roulette_start",
+  "roulette_session_id": "session-id"
+}
+```
+
+成功すると全員へ以下が届きます。
+
+```json
+{
+  "event": "roulette_spin_started",
+  "roulette_session_id": "session-id",
+  "spin_id": 1,
   "roulette_order": ["user-001", "user-002"],
+  "starts_at": "2026-01-01T00:00:00Z"
+}
+```
+
+#### roulette_stop
+
+host が Stop を押したときに送ります。backend はこのタイミングで鬼を決めます。
+
+```json
+{
+  "action": "roulette_stop",
+  "roulette_session_id": "session-id",
+  "spin_id": 1
+}
+```
+
+成功すると全員へ以下が届きます。
+
+```json
+{
+  "event": "roulette_spin_stopped",
+  "roulette_session_id": "session-id",
+  "spin_id": 1,
   "selected_oni_user_ids": ["user-002"],
-  "starts_at": "2026-01-01T00:00:00Z",
-  "duration_ms": 3000
+  "stop_at": "2026-01-01T00:00:05Z",
+  "deceleration_ms": 2500
+}
+```
+
+`selected_oni_user_ids` は backend が Stop 時に選んだ最終結果です。backend は同じ値を `pending_oni_user_ids` として保持し、次の `start` で実際の role assignment に使います。
+
+#### roulette_reset
+
+host が Reset を押したときに送ります。pending 鬼を消し、同じ session を ready に戻します。
+
+```json
+{
+  "action": "roulette_reset",
+  "roulette_session_id": "session-id"
+}
+```
+
+成功すると全員へ以下が届きます。
+
+```json
+{
+  "event": "roulette_reset",
+  "roulette_session_id": "session-id"
 }
 ```
 
 要点:
 
-- `selected_oni_user_ids` は必須です。frontend はhost/guest共通の最終停止位置として使ってください。
-- `roulette_order` は待機中プレイヤーの `user_id` を安定順で並べたものです。
-- `starts_at` と `duration_ms` はhost/guestのanimation同期用です。
-- 二重に `start_roulette` が送られた場合、参加者や設定が変わらない限りpending中の同じ結果を再送します。
+- `roulette_order` は待機中プレイヤーの `user_id` を安定順で並べたものです。session 中は固定です。
+- `roulette_start` の二重送信は拒否されます。
+- `roulette_stop` は matching `roulette_session_id` と `spin_id` が必要です。
+- Reset 後に再度 `roulette_start` / `roulette_stop` すると、backend が新しく鬼を選び直します。Reset 前の `selected_oni_user_ids` は使い回されません。
+- `roulette_stop` 済み pending がある場合、`start` は pending 鬼を優先します。pending がない場合は従来どおり `start.oni_users` を検証して使います。
 
 ### move
 

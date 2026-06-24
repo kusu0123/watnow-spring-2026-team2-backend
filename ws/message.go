@@ -2,17 +2,19 @@ package ws
 
 // フロントエンドから送られてくるデータ
 type IncomingMessage struct {
-	Action    string   `json:"action"`
-	UserID    string   `json:"user_id,omitempty"`
-	Name      string   `json:"name,omitempty"`
-	TargetID  string   `json:"target_id,omitempty"`
-	Approved  bool     `json:"approved,omitempty"`
-	Lat       float64  `json:"lat,omitempty"`
-	Lng       float64  `json:"lng,omitempty"`
-	Color     string   `json:"color,omitempty"`
-	OniUsers  []string `json:"oni_users,omitempty"`
-	PhotoURL  string   `json:"photo_url,omitempty"`
-	RequestID string   `json:"request_id,omitempty"`
+	Action            string   `json:"action"`
+	UserID            string   `json:"user_id,omitempty"`
+	Name              string   `json:"name,omitempty"`
+	TargetID          string   `json:"target_id,omitempty"`
+	Approved          bool     `json:"approved,omitempty"`
+	Lat               float64  `json:"lat,omitempty"`
+	Lng               float64  `json:"lng,omitempty"`
+	Color             string   `json:"color,omitempty"`
+	OniUsers          []string `json:"oni_users,omitempty"`
+	PhotoURL          string   `json:"photo_url,omitempty"`
+	RequestID         string   `json:"request_id,omitempty"`
+	RouletteSessionID string   `json:"roulette_session_id,omitempty"`
+	SpinID            int      `json:"spin_id,omitempty"`
 }
 
 // フロントエンドへ送信するデータ
@@ -32,9 +34,13 @@ type OutgoingMessage struct {
 	AreaCenter         *AreaCenterVal     `json:"area_center,omitempty"`
 	OniUsers           []string           `json:"oni_users,omitempty"`
 	SelectedOniUserIDs []string           `json:"selected_oni_user_ids,omitempty"`
+	RouletteSessionID  string             `json:"roulette_session_id,omitempty"`
+	SpinID             int                `json:"spin_id,omitempty"`
 	RouletteOrder      []string           `json:"roulette_order,omitempty"`
 	StartsAt           string             `json:"starts_at,omitempty"`
+	StopAt             string             `json:"stop_at,omitempty"`
 	DurationMS         int                `json:"duration_ms,omitempty"`
+	DecelerationMS     int                `json:"deceleration_ms,omitempty"`
 	TargetID           string             `json:"target_id,omitempty"`
 	AttackerName       string             `json:"attacker_name,omitempty"`
 	Approved           bool               `json:"approved,omitempty"`

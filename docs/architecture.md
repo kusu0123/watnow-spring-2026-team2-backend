@@ -90,7 +90,7 @@ REST API の routing は `main.go` に残し、`ws` には WebSocket とゲー�
 
 - 現在接続中の WebSocket client
 - 部屋ごとのゲーム進行中フラグ
-- `start_roulette` で確定した pending 鬼 assignment
+- roulette session / spin / pending 鬼 assignment
 - 猶予終了時刻
 - 本編開始時刻
 - ゲームループが動いているかどうか
@@ -110,15 +110,19 @@ REST API の routing は `main.go` に残し、`ws` には WebSocket とゲー�
 
 ルーレット時:
 
-- host の `start_roulette` action を受け取る
+- host の `prepare_roulette` action を受け取る
 - 待機中、2 人以上、鬼人数 1 から 3、全員鬼ではないことを検証する
-- 接続中 player から `selected_oni_user_ids` を確定し、`roulette_order` とともに `roulette_started` で配信する
-- pending assignment は `RoomState` に保持し、二重 `start_roulette` では同じ結果を再送する
+- 接続中 player から安定順の `roulette_order` を作り、`roulette_session_id` とともに `roulette_ready` で配信する
+- host の `roulette_start` action で `spin_id` を進め、`roulette_spin_started` を配信する。この時点では鬼を決めない
+- host の `roulette_stop` action で backend が `selected_oni_user_ids` を決め、`roulette_spin_stopped` で配信する
+- Stop 結果は `RoomState.Roulette.PendingOniUserIDs` に保持し、次の `start` の role assignment に使う
+- host の `roulette_reset` action で pending 鬼を消し、同じ session を ready に戻す
+- 互換のため `start_roulette` action は `prepare_roulette` 相当として扱う。旧仕様の `roulette_started` は送らない
 
 開始時:
 
 - `oni_users` 付きの `start` action を受け取る
-- pending assignment があれば、frontend から送られた `oni_users` より pending の `selected_oni_user_ids` を優先する
+- Stop 済み pending assignment があれば、frontend から送られた `oni_users` より pending の `selected_oni_user_ids` を優先する
 - `RoomState.Status` を `1` にする
 - DB の `rooms.status` も `1` にする
 - `oni_users` に含まれる接続中 player を鬼、その他を逃走者にする
