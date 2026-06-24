@@ -1385,34 +1385,23 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				room.mu.Unlock()
 			}
 
-			if err := db.Model(&models.Room{}).Where("id = ?", roomID).Update("status", 1).Error; err != nil {
-				rollbackStart()
-				sendError(client, "ゲーム開始状態の保存に失敗しました")
-				continue
-			}
-
-			saveFailed := false
-			for _, state := range playerStates {
-				updates := map[string]interface{}{"role": state.Role}
-				if err := db.Model(&models.Player{}).Where("room_id = ? AND user_id = ?", roomID, state.UserID).Updates(updates).Error; err != nil {
-					saveFailed = true
-					break
-				}
-			}
-			if saveFailed {
-				rollbackStart()
-				if err := db.Model(&models.Room{}).Where("id = ?", roomID).Update("status", 0).Error; err != nil {
-					log.Printf("[Error] Room: %s | ゲーム開始状態の巻き戻しに失敗しました: %v\n", roomID, err)
+			txErr := db.Transaction(func(tx *gorm.DB) error {
+				if err := tx.Model(&models.Room{}).Where("id = ?", roomID).Update("status", 1).Error; err != nil {
+					return err
 				}
 				for _, state := range playerStates {
-					if err := db.Model(&models.Player{}).Where("room_id = ? AND user_id = ?", roomID, state.UserID).Updates(map[string]interface{}{
-						"role":  state.PreviousRole,
-						"color": state.PreviousColor,
-					}).Error; err != nil {
-						log.Printf("[Error] Room: %s | User: %s | プレイヤー状態の巻き戻しに失敗しました: %v\n", roomID, state.UserID, err)
+					updates := map[string]interface{}{"role": state.Role}
+					if err := tx.Model(&models.Player{}).Where("room_id = ? AND user_id = ?", roomID, state.UserID).Updates(updates).Error; err != nil {
+						return err
 					}
 				}
-				sendError(client, "プレイヤー情報の保存に失敗しました")
+				return nil
+			})
+
+			if txErr != nil {
+				rollbackStart()
+				log.Printf("[Error] Room: %s | ゲーム開始状態の保存（トランザクション）に失敗しました: %v\n", roomID, txErr)
+				sendError(client, "ゲーム開始状態の保存に失敗しました")
 				continue
 			}
 
@@ -1508,7 +1497,7 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 					sendError(client, "プレイヤー情報の削除に失敗しました")
 					continue
 				}
-				if status == 0 {
+				if status == 0 || status == 2 {
 					newHostUserID, err := transferRoomHostIfNeeded(db, roomID, userID)
 					if err != nil {
 						client.mu.Lock()
@@ -1518,9 +1507,11 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 						continue
 					}
 					syncRoomHost(room, newHostUserID)
-					room.mu.Lock()
-					clearPendingRouletteLocked(room)
-					room.mu.Unlock()
+					if status == 0 {
+						room.mu.Lock()
+						clearPendingRouletteLocked(room)
+						room.mu.Unlock()
+					}
 				}
 			}
 
@@ -1745,6 +1736,11 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 			var req models.CaptureRequest
 			if err := db.Where("id = ?", msg.RequestID).First(&req).Error; err != nil {
 				sendError(client, "存在しない捕獲申請です")
+				continue
+			}
+
+			if req.RoomID != roomID {
+				sendError(client, "この部屋の捕獲申請ではありません")
 				continue
 			}
 

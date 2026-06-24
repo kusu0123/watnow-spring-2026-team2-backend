@@ -2006,3 +2006,151 @@ func TestReconnectionRaceCondition(t *testing.T) {
 		t.Fatalf("再接続後のカラー更新が反映されていません: got=%+v", msg.Players)
 	}
 }
+
+func TestLeaveTransfersHostInResultState(t *testing.T) {
+	roomID := "testRoom_leave_host_result"
+	db, baseURL, cleanup := newTestServer(t, models.Room{
+		ID:        roomID,
+		Status:    0,
+		TimeLimit: 900,
+		OniCount:  1,
+	})
+	defer cleanup()
+
+	wsConn1 := connectToRoom(t, baseURL, roomID)
+	sendJSON(t, wsConn1, `{"action":"join","user_id":"player1","name":"Player 1","color":"#0000FF"}`)
+	_ = readUntilEvent(t, wsConn1, "waiting")
+
+	wsConn2 := connectToRoom(t, baseURL, roomID)
+	sendJSON(t, wsConn2, `{"action":"join","user_id":"guest","name":"Guest Player","color":"#3B82F6"}`)
+	_ = readUntilEvent(t, wsConn2, "waiting")
+
+	// ゲーム開始 (ダミーで開始)
+	ready := prepareRoulette(t, wsConn1, wsConn2)
+	started := startRouletteSpin(t, wsConn1, wsConn2, ready.RouletteSessionID)
+	_ = stopRouletteSpin(t, wsConn1, wsConn2, ready.RouletteSessionID, started.SpinID)
+
+	sendJSON(t, wsConn1, `{"action":"start","oni_users":["player1"]}`)
+	_ = readUntilEvent(t, wsConn1, "start")
+
+	// ゲームを終了状態 (Status=2) に強制移行する
+	room := GameHub.GetOrCreateRoom(roomID)
+	room.mu.Lock()
+	room.Status = 2
+	room.mu.Unlock()
+	db.Model(&models.Room{}).Where("id = ?", roomID).Update("status", 2)
+
+	// ホストである player1 が leave を送信
+	sendJSON(t, wsConn1, `{"action":"leave"}`)
+
+	// guest が result イベントを受け取るはず (leave後のリザルト更新)
+	_ = readUntilEvent(t, wsConn2, "result")
+
+	// DBとメモリで guest がホストに移譲されているか確認
+	var savedRoom models.Room
+	if err := db.First(&savedRoom, "id = ?", roomID).Error; err != nil {
+		t.Fatalf("ルーム取得失敗: %v", err)
+	}
+	if savedRoom.HostUserID != "guest" {
+		t.Fatalf("DBのホストが移譲されていません: got=%s, want=guest", savedRoom.HostUserID)
+	}
+
+	if room.HostUserID != "guest" {
+		t.Fatalf("メモリのホストが移譲されていません: got=%s, want=guest", room.HostUserID)
+	}
+
+	// 新しいホストである guest から reset を送信し、正常に待機画面に戻ることを確認
+	sendJSON(t, wsConn2, `{"action":"reset"}`)
+	resetWaiting := readUntilEvent(t, wsConn2, "waiting")
+	if len(resetWaiting.Players) != 1 || resetWaiting.Players[0].UserID != "guest" {
+		t.Fatalf("新ホストからのリセットが失敗しました: %+v", resetWaiting)
+	}
+}
+
+func TestCaptureResponseChecksRoomID(t *testing.T) {
+	// Room A のセットアップ
+	roomA := "room_A"
+	db, baseURL, cleanup := newTestServer(t, models.Room{
+		ID:           roomA,
+		Status:       0,
+		TimeLimit:    900,
+		OniCount:     1,
+		SyncInterval: 60,
+		GracePeriod:  0,
+	})
+	defer cleanup()
+
+	connA1 := connectToRoom(t, baseURL, roomA)
+	defer connA1.Close()
+	connA2 := connectToRoom(t, baseURL, roomA)
+	defer connA2.Close()
+
+	sendJSON(t, connA1, `{"action":"join","user_id":"player1","name":"Player 1"}`)
+	readUntilEvent(t, connA1, "waiting")
+	sendJSON(t, connA2, `{"action":"join","user_id":"player2","name":"Player 2"}`)
+	readUntilEvent(t, connA1, "waiting")
+	readUntilEvent(t, connA2, "waiting")
+
+	sendJSON(t, connA1, `{"action":"start","oni_users":["player1"]}`)
+	readUntilEvent(t, connA1, "start")
+	readUntilEvent(t, connA2, "start")
+	readUntilEvent(t, connA2, "game_active")
+
+	// player1 (鬼) から player2 (逃走者) へのキャプチャ申請
+	sendJSON(t, connA1, `{"action":"capture_request","target_id":"player2","photo_url":"https://example.com/photo.jpg"}`)
+	checking := readUntilEvent(t, connA2, "capture_checking")
+	reqID := checking.RequestID
+	if reqID == "" {
+		t.Fatal("RequestIDが取得できませんでした")
+	}
+
+	// Room B のセットアップ
+	roomB := "room_B"
+	// Room B をDBに追加
+	if err := db.Create(&models.Room{
+		ID:           roomB,
+		Status:       0,
+		TimeLimit:    900,
+		OniCount:     1,
+		SyncInterval: 60,
+		GracePeriod:  0,
+	}).Error; err != nil {
+		t.Fatalf("Room B 作成失敗: %v", err)
+	}
+
+	connB1 := connectToRoom(t, baseURL, roomB)
+	defer connB1.Close()
+	connB2 := connectToRoom(t, baseURL, roomB)
+	defer connB2.Close()
+
+	sendJSON(t, connB1, `{"action":"join","user_id":"player3","name":"Player 3"}`)
+	readUntilEvent(t, connB1, "waiting")
+	sendJSON(t, connB2, `{"action":"join","user_id":"player4","name":"Player 4"}`)
+	readUntilEvent(t, connB1, "waiting")
+	readUntilEvent(t, connB2, "waiting")
+
+	sendJSON(t, connB1, `{"action":"start","oni_users":["player3"]}`)
+	readUntilEvent(t, connB1, "start")
+	readUntilEvent(t, connB2, "start")
+	readUntilEvent(t, connB2, "game_active")
+
+	// player4 (Room B の逃走者) が Room A の reqID に対して承認を試みる
+	sendJSON(t, connB2, fmt.Sprintf(`{"action":"capture_response","approved":true,"request_id":%q}`, reqID))
+	errB2 := readUntilEvent(t, connB2, "error")
+	if !strings.Contains(errB2.Message, "この部屋の捕獲申請ではありません") {
+		t.Fatalf("別ルームのキャプチャレスポンスが拒否されませんでした: %s", errB2.Message)
+	}
+
+	// DB上のリクエストのステータスが "pending" のままであることを確認
+	var req models.CaptureRequest
+	if err := db.First(&req, "id = ?", reqID).Error; err != nil {
+		t.Fatalf("リクエスト取得失敗: %v", err)
+	}
+	if req.Status != "pending" {
+		t.Fatalf("リクエストステータスが更新されてしまいました: %s", req.Status)
+	}
+
+	// 各プレイヤーが捕まっていないことを確認
+	assertDBPlayerCaught(t, db, roomA, "player2", false)
+	assertDBPlayerCaught(t, db, roomB, "player4", false)
+}
