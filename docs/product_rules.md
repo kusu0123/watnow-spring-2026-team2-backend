@@ -27,13 +27,20 @@
 
 ゲーム開始時の流れは以下です。
 
-1. host が必要に応じて WebSocket で `action: "start_roulette"` を送信します。
-2. サーバーが鬼を確定し、`event: "roulette_started"` に `selected_oni_user_ids`、`roulette_order`、`starts_at`、`duration_ms` を含めて配信します。
-3. フロントから WebSocket で `action: "start"` を送信します。
-4. サーバーが `start_roulette` で確定した鬼を優先し、pending がない場合だけ `start.oni_users` を使います。
-5. 各プレイヤーへ `event: "start"` が届きます。
-6. `grace_period` が終わると `event: "game_active"` が届きます。
-7. 本編中は `sync_interval` ごとに `event: "sync"` が届きます。
+1. host が必要に応じて WebSocket で `action: "prepare_roulette"` を送信します。
+2. サーバーが `event: "roulette_ready"` に `roulette_session_id` と `roulette_order` を含めて配信し、全員がルーレット画面へ進みます。この時点では鬼は決まりません。
+3. host が `action: "roulette_start"` を送信します。
+4. サーバーが `event: "roulette_spin_started"` を配信し、全員のルーレット animation が同じ `roulette_order` で回り始めます。この時点でも鬼は決まりません。
+5. host が `action: "roulette_stop"` を送信します。
+6. サーバーが Stop 時点で鬼を決め、`event: "roulette_spin_stopped"` に `selected_oni_user_ids` を含めて配信します。この値が frontend の停止結果であり、backend の pending 鬼です。
+7. host が Reset する場合は `action: "roulette_reset"` を送信します。サーバーは pending 鬼を消し、次の Start/Stop で新しく選び直します。
+8. フロントから WebSocket で `action: "start"` を送信します。
+9. サーバーが `roulette_stop` で確定した pending 鬼を優先し、pending がない場合だけ `start.oni_users` を使います。
+10. 各プレイヤーへ `event: "start"` が届きます。
+11. `grace_period` が終わると `event: "game_active"` が届きます。
+12. 本編中は `sync_interval` ごとに `event: "sync"` が届きます。
+
+互換のため `action: "start_roulette"` は `prepare_roulette` と同じ扱いです。旧仕様のように `start_roulette` 時点で鬼は決めません。
 
 鬼に指定されたプレイヤーの表示色は、ゲーム中の接続メモリでは `black` になります。DB の `player.color` は再戦時に待機色を復元できるよう、元の選択色を保持します。
 

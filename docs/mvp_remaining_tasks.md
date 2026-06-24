@@ -27,7 +27,7 @@
 | game_results / player_results 保存 | P1 | backend | result contract 確定 | backend | ゲーム終了時に game result と player result を保存できる |
 | result survival_seconds / captured_at 追加 | P1 | backend / frontend | capture result flow | backend + frontend | result payload に逃走者の `survival_seconds` と捕獲済みの `captured_at` が入る |
 | winner / end_reason 追加 | P1 | backend / frontend | result 保存方針 | backend + frontend | result payload に勝者と終了理由が入り、frontend が優先表示できる |
-| roulette 同期 | P1 | backend / frontend | host / waiting flow | backend + frontend | backend は `selected_oni_user_ids` / `roulette_order` / `starts_at` / `duration_ms` と start role 整合まで対応済み。frontend 停止演出反映で完了 |
+| roulette 同期 | P1 | backend / frontend | host / waiting flow | backend + frontend | backend は `prepare_roulette` / `roulette_start` / `roulette_stop` / `roulette_reset`、Stop時の `selected_oni_user_ids`、start role 整合まで対応済み。frontend が Stop 結果を停止演出の source of truth にして完了 |
 | result 画面拡張 | P1 | frontend | winner / end_reason / survival_seconds 追加 | frontend | 勝者、終了理由、生存秒数、写真を表示できる |
 | MVP 外 UI 整理 | P1 | frontend | MVP scope 確定 | frontend | mission / chat / area shrink など未実装 UI が誤操作を誘導しない |
 | 位置未取得時の 0,0 対策 | P1 | frontend / backend | sync payload 確認 | frontend + backend | 初期値 `0,0` を実位置として表示しない。未取得状態を UI / payload で区別できる |
@@ -38,7 +38,7 @@
 | --- | --- | --- | --- | --- | --- |
 | result 履歴 | P2 | frontend / backend | game_results / player_results 保存 | frontend + backend | 過去 game result を取得・表示できる |
 | 切断 30 秒判定 | P2 | backend / frontend | WebSocket 切断方針 | backend + frontend | 通常切断後 30 秒以内は復帰扱い、超過後の扱いが明確になる |
-| host 権限強化 | P2 | backend / frontend | user / host 方針 | backend + frontend | backend は `start` / `start_roulette` をhostのみに制限済み。settings / reset の権限方針は別途確定 |
+| host 権限強化 | P2 | backend / frontend | user / host 方針 | backend + frontend | backend は `start` / roulette 操作をhostのみに制限済み。settings / result後 `reset` の権限方針は別途確定 |
 | color 被り防止 | P2 | backend / frontend | update_color / join | backend + frontend | backend は `update_color` の重複と黒予約拒否、join 時の安全色自動割当まで対応済み。frontend は使用中色のdisabled表示を行う |
 | mission | P2 | frontend / backend | MVP 後 scope | frontend + backend | mission payload と UI が定義・実装される |
 | chat | P2 | frontend / backend | MVP 後 scope | frontend + backend | chat payload と UI が定義・実装される |

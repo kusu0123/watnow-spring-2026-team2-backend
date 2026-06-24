@@ -48,8 +48,11 @@
 | update_color | 待機中は `waiting`、ゲーム中は次回 `sync` に反映される | 実装済み |
 | color 重複対応 | `update_color` は重複・黒を拒否し、`join` は空・黒・重複を自動割当する | 実装済み |
 | room_settings broadcast | `PUT /rooms/:id` 後に全員へ `mission_enabled` と `max_players` を含む最新設定が届く | 実装済み |
-| roulette_started | host の `start_roulette` で全員へ `selected_oni_user_ids` / `roulette_order` / `starts_at` / `duration_ms` 付きで届く | 実装済み |
-| roulette / start 整合 | `start_roulette` で確定した鬼が、その後の `start` の実roleにも使われる | 実装済み |
+| roulette_ready | host の `prepare_roulette` で全員へ `roulette_session_id` / `roulette_order` が届く。鬼はまだ決まらない | 実装済み |
+| roulette_spin_started | host の `roulette_start` で全員へ `roulette_session_id` / `spin_id` / `roulette_order` / `starts_at` が届く | 実装済み |
+| roulette_spin_stopped | host の `roulette_stop` で backend が `selected_oni_user_ids` を決め、全員へ同じ結果が届く | 実装済み |
+| roulette_reset | host の `roulette_reset` で pending 鬼が消え、次の Stop で新しく選び直せる | 実装済み |
+| roulette / start 整合 | `roulette_stop` で確定した pending 鬼が、その後の `start` の実roleにも使われる | 実装済み |
 | host移譲 | waiting中にhostが退出すると残りplayerへhostが移る | 実装済み |
 | 捕獲済み runner の位置非表示 | 捕獲済み逃走者の座標が他プレイヤーの表示対象にならない | Step4 以降も継続確認 |
 | result payload 拡張 | `survival_seconds` / `captured_at` / capture `photo_url` が追加される | 実装済み |
@@ -97,10 +100,12 @@
 3. 2 人以上が同じルームへ WebSocket 接続する。
 4. 各プレイヤーが `join` を送る。
 5. 参加者一覧が `waiting` で更新される。
-6. 1 人が `start` を送る。
-7. 全員が `start` と `game_active` を受け取る。
-8. 各プレイヤーが `move` を送る。
-9. viewer 別の `sync` で位置情報を受け取る。
-10. Step4 以降、鬼が `capture_request` を送り、逃走者が `capture_response` を返す。
-11. Step4 以降、`captured` / `capture_denied` / `capture_expired` を確認する。
-12. 終了条件を満たしたら `result` が届く。
+6. ルーレットを使う場合は、host が `prepare_roulette` -> `roulette_start` -> `roulette_stop` を送り、全員が `roulette_ready` -> `roulette_spin_started` -> `roulette_spin_stopped` を受け取る。
+7. `roulette_spin_stopped.selected_oni_user_ids` を frontend の停止結果として表示する。
+8. host が `start` を送る。
+9. 全員が `start` と `game_active` を受け取る。ルーレットを使った場合、`start.oni_users` は Stop 結果と一致する。
+10. 各プレイヤーが `move` を送る。
+11. viewer 別の `sync` で位置情報を受け取る。
+12. Step4 以降、鬼が `capture_request` を送り、逃走者が `capture_response` を返す。
+13. Step4 以降、`captured` / `capture_denied` / `capture_expired` を確認する。
+14. 終了条件を満たしたら `result` が届く。

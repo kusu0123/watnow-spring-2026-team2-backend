@@ -26,13 +26,16 @@ var upgrader = websocket.Upgrader{
 }
 
 const (
-	minStartPlayers    = 2
-	minRoomPlayers     = 2
-	defaultMaxPlayers  = 6
-	maxRoomPlayers     = 15
-	minOniUsers        = 1
-	maxOniUsers        = 3
-	rouletteDurationMS = 3000
+	minStartPlayers        = 2
+	minRoomPlayers         = 2
+	defaultMaxPlayers      = 6
+	maxRoomPlayers         = 15
+	minOniUsers            = 1
+	maxOniUsers            = 3
+	rouletteDecelerationMS = 2500
+	rouletteStatusReady    = "ready"
+	rouletteStatusSpinning = "spinning"
+	rouletteStatusStopped  = "stopped"
 )
 
 type Client struct {
@@ -53,30 +56,37 @@ type Client struct {
 	mu             sync.Mutex
 }
 
+type RouletteState struct {
+	SessionID         string
+	SpinID            int
+	Status            string
+	RouletteOrder     []string
+	PendingOniUserIDs []string
+	StartedAt         *time.Time
+	StoppedAt         *time.Time
+}
+
 type RoomState struct {
-	Status                    int
-	TimeLimit                 int
-	OniCount                  int // 追加
-	MaxPlayers                int
-	AreaSize                  string
-	SyncInterval              int // 追加
-	GracePeriod               int // 追加
-	MissionEnabled            bool
-	AreaCenterLat             float64
-	AreaCenterLng             float64
-	HasAreaCenter             bool
-	HostUserID                string
-	StartAt                   time.Time
-	ActiveAt                  time.Time
-	IsGameActive              bool
-	Clients                   map[*Client]bool
-	IsGMLoopActive            bool // 追加：GMの重複起動防止
-	LoopID                    uint64
-	PendingOniUserIDs         []string
-	PendingRouletteOrder      []string
-	PendingRouletteStartsAt   time.Time
-	PendingRouletteDurationMS int
-	mu                        sync.RWMutex
+	Status         int
+	TimeLimit      int
+	OniCount       int // 追加
+	MaxPlayers     int
+	AreaSize       string
+	SyncInterval   int // 追加
+	GracePeriod    int // 追加
+	MissionEnabled bool
+	AreaCenterLat  float64
+	AreaCenterLng  float64
+	HasAreaCenter  bool
+	HostUserID     string
+	StartAt        time.Time
+	ActiveAt       time.Time
+	IsGameActive   bool
+	Clients        map[*Client]bool
+	IsGMLoopActive bool // 追加：GMの重複起動防止
+	LoopID         uint64
+	Roulette       RouletteState
+	mu             sync.RWMutex
 }
 
 type Hub struct {
@@ -324,10 +334,7 @@ func safeJoinColor(db *gorm.DB, roomID, userID, requestedColor string) (string, 
 }
 
 func clearPendingRouletteLocked(room *RoomState) {
-	room.PendingOniUserIDs = nil
-	room.PendingRouletteOrder = nil
-	room.PendingRouletteStartsAt = time.Time{}
-	room.PendingRouletteDurationMS = 0
+	room.Roulette = RouletteState{}
 }
 
 func copyStrings(values []string) []string {
@@ -337,32 +344,51 @@ func copyStrings(values []string) []string {
 	return append([]string(nil), values...)
 }
 
-func rouletteStartedMessage(order, selectedOniUserIDs []string, startsAt time.Time, durationMS int) OutgoingMessage {
-	if startsAt.IsZero() {
-		startsAt = time.Now().UTC()
-	}
-	if durationMS <= 0 {
-		durationMS = rouletteDurationMS
-	}
+func timePtr(t time.Time) *time.Time {
+	utc := t.UTC()
+	return &utc
+}
+
+func rouletteReadyMessage(sessionID string, order []string) OutgoingMessage {
 	return OutgoingMessage{
-		Event:              "roulette_started",
-		RouletteOrder:      copyStrings(order),
-		SelectedOniUserIDs: copyStrings(selectedOniUserIDs),
-		StartsAt:           startsAt.UTC().Format(time.RFC3339Nano),
-		DurationMS:         durationMS,
+		Event:             "roulette_ready",
+		RouletteSessionID: sessionID,
+		RouletteOrder:     copyStrings(order),
 	}
 }
 
-func pendingRouletteMessageLocked(room *RoomState) (OutgoingMessage, bool) {
-	if len(room.PendingOniUserIDs) == 0 {
-		return OutgoingMessage{}, false
+func rouletteSpinStartedMessage(sessionID string, spinID int, order []string, startsAt time.Time) OutgoingMessage {
+	if startsAt.IsZero() {
+		startsAt = time.Now().UTC()
 	}
-	return rouletteStartedMessage(
-		room.PendingRouletteOrder,
-		room.PendingOniUserIDs,
-		room.PendingRouletteStartsAt,
-		room.PendingRouletteDurationMS,
-	), true
+	return OutgoingMessage{
+		Event:             "roulette_spin_started",
+		RouletteSessionID: sessionID,
+		SpinID:            spinID,
+		RouletteOrder:     copyStrings(order),
+		StartsAt:          startsAt.UTC().Format(time.RFC3339Nano),
+	}
+}
+
+func rouletteSpinStoppedMessage(sessionID string, spinID int, selectedOniUserIDs []string, stopAt time.Time) OutgoingMessage {
+	if stopAt.IsZero() {
+		stopAt = time.Now().UTC()
+	}
+	return OutgoingMessage{
+		Event:              "roulette_spin_stopped",
+		RouletteSessionID:  sessionID,
+		SpinID:             spinID,
+		SelectedOniUserIDs: copyStrings(selectedOniUserIDs),
+		StopAt:             stopAt.UTC().Format(time.RFC3339Nano),
+		DecelerationMS:     rouletteDecelerationMS,
+	}
+}
+
+func rouletteResetMessage(sessionID string) OutgoingMessage {
+	return OutgoingMessage{
+		Event:             "roulette_reset",
+		RouletteSessionID: sessionID,
+	}
 }
 
 func connectedUserIDsLocked(room *RoomState) []string {
@@ -387,6 +413,26 @@ func selectOniUserIDs(userIDs []string, oniCount int) []string {
 	selected := candidates[:oniCount]
 	sort.Strings(selected)
 	return copyStrings(selected)
+}
+
+func validateRoulettePlayersLocked(room *RoomState, userIDs []string) string {
+	playerCount := len(userIDs)
+	if playerCount < minStartPlayers {
+		return "ゲーム開始には2人以上必要です"
+	}
+	if room.OniCount < minOniUsers || room.OniCount > maxOniUsers {
+		return "鬼は1〜3人で指定してください"
+	}
+	if room.OniCount >= playerCount {
+		return "全員を鬼にはできません"
+	}
+	return ""
+}
+
+func joinedClientIdentity(client *Client) (string, string) {
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	return client.UserID, client.PlayerID
 }
 
 func syncRoomHost(room *RoomState, hostUserID string) {
@@ -952,11 +998,8 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				room.Broadcast(room.waitingMessage())
 			}
 
-		case "start_roulette":
-			client.mu.Lock()
-			userID := client.UserID
-			playerID := client.PlayerID
-			client.mu.Unlock()
+		case "prepare_roulette", "start_roulette":
+			userID, playerID := joinedClientIdentity(client)
 			if userID == "" || playerID == "" {
 				sendError(client, "先に入室してください")
 				continue
@@ -971,37 +1014,165 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				sendError(client, "ルーレット開始は待機中のみ実行できます")
 				continue
 			}
-			if rouletteMessage, ok := pendingRouletteMessageLocked(room); ok {
-				room.mu.Unlock()
-				room.Broadcast(rouletteMessage)
-				continue
-			}
 
 			rouletteOrder := connectedUserIDsLocked(room)
-			playerCount := len(rouletteOrder)
-			if playerCount < minStartPlayers {
+			if errorMessage := validateRoulettePlayersLocked(room, rouletteOrder); errorMessage != "" {
 				room.mu.Unlock()
-				sendError(client, "ゲーム開始には2人以上必要です")
-				continue
-			}
-			if room.OniCount < minOniUsers || room.OniCount > maxOniUsers {
-				room.mu.Unlock()
-				sendError(client, "鬼は1〜3人で指定してください")
-				continue
-			}
-			if room.OniCount >= playerCount {
-				room.mu.Unlock()
-				sendError(client, "全員を鬼にはできません")
+				sendError(client, errorMessage)
 				continue
 			}
 
-			selectedOniUserIDs := selectOniUserIDs(rouletteOrder, room.OniCount)
+			sessionID := uuid.New().String()
+			room.Roulette = RouletteState{
+				SessionID:     sessionID,
+				Status:        rouletteStatusReady,
+				RouletteOrder: copyStrings(rouletteOrder),
+			}
+			rouletteMessage := rouletteReadyMessage(sessionID, rouletteOrder)
+			room.mu.Unlock()
+
+			room.Broadcast(rouletteMessage)
+
+		case "roulette_start":
+			userID, playerID := joinedClientIdentity(client)
+			if userID == "" || playerID == "" {
+				sendError(client, "先に入室してください")
+				continue
+			}
+			if !room.isHost(userID) {
+				sendError(client, "ホストのみ実行できます")
+				continue
+			}
+			if msg.RouletteSessionID == "" {
+				sendError(client, "ルーレットセッションIDがありません")
+				continue
+			}
+
+			room.mu.Lock()
+			if room.Status != 0 {
+				room.mu.Unlock()
+				sendError(client, "ルーレット開始は待機中のみ実行できます")
+				continue
+			}
+			if room.Roulette.SessionID == "" || room.Roulette.SessionID != msg.RouletteSessionID {
+				room.mu.Unlock()
+				sendError(client, "ルーレットセッションが見つかりません")
+				continue
+			}
+			if room.Roulette.Status == rouletteStatusSpinning {
+				room.mu.Unlock()
+				sendError(client, "ルーレットはすでに回転中です")
+				continue
+			}
+			if room.Roulette.Status != rouletteStatusReady {
+				room.mu.Unlock()
+				sendError(client, "ルーレットをリセットしてください")
+				continue
+			}
+			if errorMessage := validateRoulettePlayersLocked(room, room.Roulette.RouletteOrder); errorMessage != "" {
+				room.mu.Unlock()
+				sendError(client, errorMessage)
+				continue
+			}
+
+			room.Roulette.SpinID++
 			startsAt := time.Now().UTC()
-			room.PendingOniUserIDs = copyStrings(selectedOniUserIDs)
-			room.PendingRouletteOrder = copyStrings(rouletteOrder)
-			room.PendingRouletteStartsAt = startsAt
-			room.PendingRouletteDurationMS = rouletteDurationMS
-			rouletteMessage := rouletteStartedMessage(rouletteOrder, selectedOniUserIDs, startsAt, rouletteDurationMS)
+			room.Roulette.Status = rouletteStatusSpinning
+			room.Roulette.PendingOniUserIDs = nil
+			room.Roulette.StartedAt = timePtr(startsAt)
+			room.Roulette.StoppedAt = nil
+			rouletteMessage := rouletteSpinStartedMessage(room.Roulette.SessionID, room.Roulette.SpinID, room.Roulette.RouletteOrder, startsAt)
+			room.mu.Unlock()
+
+			room.Broadcast(rouletteMessage)
+
+		case "roulette_stop":
+			userID, playerID := joinedClientIdentity(client)
+			if userID == "" || playerID == "" {
+				sendError(client, "先に入室してください")
+				continue
+			}
+			if !room.isHost(userID) {
+				sendError(client, "ホストのみ実行できます")
+				continue
+			}
+			if msg.RouletteSessionID == "" {
+				sendError(client, "ルーレットセッションIDがありません")
+				continue
+			}
+			if msg.SpinID <= 0 {
+				sendError(client, "spin_idがありません")
+				continue
+			}
+
+			room.mu.Lock()
+			if room.Status != 0 {
+				room.mu.Unlock()
+				sendError(client, "ルーレット停止は待機中のみ実行できます")
+				continue
+			}
+			if room.Roulette.SessionID == "" || room.Roulette.SessionID != msg.RouletteSessionID {
+				room.mu.Unlock()
+				sendError(client, "ルーレットセッションが見つかりません")
+				continue
+			}
+			if room.Roulette.SpinID != msg.SpinID {
+				room.mu.Unlock()
+				sendError(client, "spin_idが一致しません")
+				continue
+			}
+			if room.Roulette.Status != rouletteStatusSpinning {
+				room.mu.Unlock()
+				sendError(client, "ルーレットは開始されていません")
+				continue
+			}
+			if errorMessage := validateRoulettePlayersLocked(room, room.Roulette.RouletteOrder); errorMessage != "" {
+				room.mu.Unlock()
+				sendError(client, errorMessage)
+				continue
+			}
+
+			selectedOniUserIDs := selectOniUserIDs(room.Roulette.RouletteOrder, room.OniCount)
+			stoppedAt := time.Now().UTC()
+			room.Roulette.Status = rouletteStatusStopped
+			room.Roulette.PendingOniUserIDs = copyStrings(selectedOniUserIDs)
+			room.Roulette.StoppedAt = timePtr(stoppedAt)
+			rouletteMessage := rouletteSpinStoppedMessage(room.Roulette.SessionID, room.Roulette.SpinID, selectedOniUserIDs, stoppedAt)
+			room.mu.Unlock()
+
+			room.Broadcast(rouletteMessage)
+
+		case "roulette_reset":
+			userID, playerID := joinedClientIdentity(client)
+			if userID == "" || playerID == "" {
+				sendError(client, "先に入室してください")
+				continue
+			}
+			if !room.isHost(userID) {
+				sendError(client, "ホストのみ実行できます")
+				continue
+			}
+			if msg.RouletteSessionID == "" {
+				sendError(client, "ルーレットセッションIDがありません")
+				continue
+			}
+
+			room.mu.Lock()
+			if room.Status != 0 {
+				room.mu.Unlock()
+				sendError(client, "ルーレットリセットは待機中のみ実行できます")
+				continue
+			}
+			if room.Roulette.SessionID == "" || room.Roulette.SessionID != msg.RouletteSessionID {
+				room.mu.Unlock()
+				sendError(client, "ルーレットセッションが見つかりません")
+				continue
+			}
+			room.Roulette.Status = rouletteStatusReady
+			room.Roulette.PendingOniUserIDs = nil
+			room.Roulette.StartedAt = nil
+			room.Roulette.StoppedAt = nil
+			rouletteMessage := rouletteResetMessage(room.Roulette.SessionID)
 			room.mu.Unlock()
 
 			room.Broadcast(rouletteMessage)
@@ -1027,7 +1198,7 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				continue
 			}
 
-			selectedOniUsers := copyStrings(room.PendingOniUserIDs)
+			selectedOniUsers := copyStrings(room.Roulette.PendingOniUserIDs)
 			if len(selectedOniUsers) == 0 {
 				selectedOniUsers = copyStrings(msg.OniUsers)
 			}
