@@ -396,6 +396,7 @@ func TestUpdateColorRejectsInvalidColor(t *testing.T) {
 		ID:        roomID,
 		Status:    0,
 		TimeLimit: 900,
+		OniCount:  1,
 	})
 	defer cleanup()
 
@@ -419,6 +420,7 @@ func TestUpdateColorRejectsDuplicateAndReservedBlack(t *testing.T) {
 		ID:        roomID,
 		Status:    0,
 		TimeLimit: 900,
+		OniCount:  1,
 	})
 	defer cleanup()
 
@@ -440,7 +442,16 @@ func TestUpdateColorRejectsDuplicateAndReservedBlack(t *testing.T) {
 	duplicateJoinConn := connectToRoom(t, baseURL, roomID)
 	defer duplicateJoinConn.Close()
 	sendJSON(t, duplicateJoinConn, `{"action":"join","user_id":"player3","name":"そうた","color":"#FF00AA"}`)
-	assertErrorMessage(t, duplicateJoinConn, "このカラーはすでに使われています")
+	duplicateJoinWaiting := readUntilEvent(t, duplicateJoinConn, "waiting")
+	player3, ok := findWaitingPlayer(duplicateJoinWaiting.Players, "player3")
+	if !ok {
+		t.Fatalf("重複色join後のwaitingにplayer3が含まれていません: %+v", duplicateJoinWaiting.Players)
+	}
+	if player3.Color == "" || player3.Color == "#FF00AA" {
+		t.Fatalf("重複色joinで安全な色が自動割当されていません: %+v", player3)
+	}
+	readUntilEvent(t, wsConn1, "waiting")
+	readUntilEvent(t, wsConn2, "waiting")
 
 	sendJSON(t, wsConn1, `{"action":"update_color","color":"#FF00AA"}`)
 	assertErrorMessage(t, wsConn1, "このカラーはすでに使われています")
@@ -597,6 +608,7 @@ func TestStartRouletteBroadcastsToRoom(t *testing.T) {
 		ID:        roomID,
 		Status:    0,
 		TimeLimit: 900,
+		OniCount:  1,
 	})
 	defer cleanup()
 
@@ -616,12 +628,112 @@ func TestStartRouletteBroadcastsToRoom(t *testing.T) {
 	}
 
 	sendJSON(t, hostConn, `{"action":"start_roulette"}`)
-	if msg := readUntilEvent(t, hostConn, "roulette_started"); msg.Event != "roulette_started" {
-		t.Fatalf("hostにroulette_startedが届いていません: %+v", msg)
+	hostRoulette := readUntilEvent(t, hostConn, "roulette_started")
+	if hostRoulette.Event != "roulette_started" {
+		t.Fatalf("hostにroulette_startedが届いていません: %+v", hostRoulette)
 	}
-	if msg := readUntilEvent(t, guestConn, "roulette_started"); msg.Event != "roulette_started" {
-		t.Fatalf("guestにroulette_startedが届いていません: %+v", msg)
+	guestRoulette := readUntilEvent(t, guestConn, "roulette_started")
+	if guestRoulette.Event != "roulette_started" {
+		t.Fatalf("guestにroulette_startedが届いていません: %+v", guestRoulette)
 	}
+	if strings.Join(hostRoulette.RouletteOrder, ",") != "player1,player2" {
+		t.Fatalf("roulette_orderが不正です: %+v", hostRoulette.RouletteOrder)
+	}
+	if len(hostRoulette.SelectedOniUserIDs) != 1 || hostRoulette.StartsAt == "" || hostRoulette.DurationMS != rouletteDurationMS {
+		t.Fatalf("roulette_started payloadが不足しています: %+v", hostRoulette)
+	}
+	if strings.Join(hostRoulette.SelectedOniUserIDs, ",") != strings.Join(guestRoulette.SelectedOniUserIDs, ",") ||
+		strings.Join(hostRoulette.RouletteOrder, ",") != strings.Join(guestRoulette.RouletteOrder, ",") ||
+		hostRoulette.StartsAt != guestRoulette.StartsAt ||
+		hostRoulette.DurationMS != guestRoulette.DurationMS {
+		t.Fatalf("host/guestのroulette payloadが一致していません: host=%+v guest=%+v", hostRoulette, guestRoulette)
+	}
+}
+
+func TestStartUsesPendingRouletteSelection(t *testing.T) {
+	roomID := "roulettePendingRoom"
+	_, baseURL, cleanup := newTestServer(t, models.Room{
+		ID:           roomID,
+		Status:       0,
+		TimeLimit:    120,
+		OniCount:     1,
+		SyncInterval: 30,
+		GracePeriod:  0,
+	})
+	defer cleanup()
+
+	hostConn := connectToRoom(t, baseURL, roomID)
+	defer hostConn.Close()
+	guestConn := connectToRoom(t, baseURL, roomID)
+	defer guestConn.Close()
+
+	sendJSON(t, hostConn, `{"action":"join","user_id":"player1","name":"はるき"}`)
+	readUntilEvent(t, hostConn, "waiting")
+	sendJSON(t, guestConn, `{"action":"join","user_id":"player2","name":"みな"}`)
+	readUntilEvent(t, hostConn, "waiting")
+	readUntilEvent(t, guestConn, "waiting")
+
+	sendJSON(t, hostConn, `{"action":"start_roulette"}`)
+	firstHostRoulette := readUntilEvent(t, hostConn, "roulette_started")
+	firstGuestRoulette := readUntilEvent(t, guestConn, "roulette_started")
+	sendJSON(t, hostConn, `{"action":"start_roulette"}`)
+	secondHostRoulette := readUntilEvent(t, hostConn, "roulette_started")
+	secondGuestRoulette := readUntilEvent(t, guestConn, "roulette_started")
+
+	if strings.Join(firstHostRoulette.SelectedOniUserIDs, ",") != strings.Join(secondHostRoulette.SelectedOniUserIDs, ",") ||
+		firstHostRoulette.StartsAt != secondHostRoulette.StartsAt ||
+		strings.Join(firstGuestRoulette.SelectedOniUserIDs, ",") != strings.Join(secondGuestRoulette.SelectedOniUserIDs, ",") {
+		t.Fatalf("二重start_rouletteでpending結果がズレています: firstHost=%+v secondHost=%+v firstGuest=%+v secondGuest=%+v", firstHostRoulette, secondHostRoulette, firstGuestRoulette, secondGuestRoulette)
+	}
+
+	selected := firstHostRoulette.SelectedOniUserIDs[0]
+	wrongOni := "player1"
+	if selected == "player1" {
+		wrongOni = "player2"
+	}
+	sendJSON(t, hostConn, `{"action":"start","oni_users":["`+wrongOni+`"]}`)
+
+	hostStart := readUntilEvent(t, hostConn, "start")
+	guestStart := readUntilEvent(t, guestConn, "start")
+	if len(hostStart.OniUsers) != 1 || hostStart.OniUsers[0] != selected || len(guestStart.OniUsers) != 1 || guestStart.OniUsers[0] != selected {
+		t.Fatalf("startがpending rouletteの鬼を使っていません: selected=%s host=%+v guest=%+v", selected, hostStart, guestStart)
+	}
+	if selected == "player1" {
+		if hostStart.Role == nil || *hostStart.Role != 1 || guestStart.Role == nil || *guestStart.Role != 0 {
+			t.Fatalf("pending rouletteのrole反映が不正です: host=%+v guest=%+v", hostStart, guestStart)
+		}
+	} else {
+		if hostStart.Role == nil || *hostStart.Role != 0 || guestStart.Role == nil || *guestStart.Role != 1 {
+			t.Fatalf("pending rouletteのrole反映が不正です: host=%+v guest=%+v", hostStart, guestStart)
+		}
+	}
+}
+
+func TestJoinUsesMaxPlayersLimit(t *testing.T) {
+	roomID := "maxPlayersJoinRoom"
+	_, baseURL, cleanup := newTestServer(t, models.Room{
+		ID:         roomID,
+		Status:     0,
+		TimeLimit:  900,
+		MaxPlayers: 2,
+	})
+	defer cleanup()
+
+	conn1 := connectToRoom(t, baseURL, roomID)
+	defer conn1.Close()
+	conn2 := connectToRoom(t, baseURL, roomID)
+	defer conn2.Close()
+	conn3 := connectToRoom(t, baseURL, roomID)
+	defer conn3.Close()
+
+	sendJSON(t, conn1, `{"action":"join","user_id":"player1","name":"はるき"}`)
+	readUntilEvent(t, conn1, "waiting")
+	sendJSON(t, conn2, `{"action":"join","user_id":"player2","name":"みな"}`)
+	readUntilEvent(t, conn1, "waiting")
+	readUntilEvent(t, conn2, "waiting")
+
+	sendJSON(t, conn3, `{"action":"join","user_id":"player3","name":"そうた"}`)
+	assertErrorMessage(t, conn3, "参加人数は2人までです")
 }
 
 func TestJoinNameValidationTrimsAndCountsRunes(t *testing.T) {
@@ -638,13 +750,13 @@ func TestJoinNameValidationTrimsAndCountsRunes(t *testing.T) {
 
 	sendJSON(t, wsConn, `{"action":"join","user_id":"player1","name":"  あいうえおかきくけこさし  "}`)
 	waiting := readUntilEvent(t, wsConn, "waiting")
-	assertWaitingPlayer(t, waiting, "player1", "あいうえおかきくけこさし", "")
+	assertWaitingPlayer(t, waiting, "player1", "あいうえおかきくけこさし", playerColorPalette[0])
 
 	var player models.Player
 	if err := db.Where("room_id = ? AND user_id = ?", roomID, "player1").First(&player).Error; err != nil {
 		t.Fatalf("プレイヤー取得失敗: %v", err)
 	}
-	if player.Name != "あいうえおかきくけこさし" {
+	if player.Name != "あいうえおかきくけこさし" || player.Color != playerColorPalette[0] {
 		t.Fatalf("trim後の名前が保存されていません: %+v", player)
 	}
 
@@ -778,7 +890,7 @@ func TestWebSocketStartFlowWithSettings(t *testing.T) {
 	if err := db.Where("room_id = ? AND user_id = ?", roomID, "player2").First(&oni).Error; err != nil {
 		t.Fatalf("鬼取得失敗: %v", err)
 	}
-	if oni.Role != 1 || oni.Color != "black" {
+	if oni.Role != 1 || oni.Color != "#FF00AA" {
 		t.Fatalf("DBに保存された鬼状態が不正です: %+v", oni)
 	}
 	client, ok := findClient(room, "player2")
@@ -979,7 +1091,7 @@ func TestUnlocatedPlayersDoNotExposeZeroCoordinatesInSync(t *testing.T) {
 	if !ok {
 		t.Fatalf("逃走者向けsyncに自分の状態が含まれていません: %+v", runnerSync.Locations)
 	}
-	assertLocationMeta(t, selfLocation, roomID, "player2", "みな", 0, false, "")
+	assertLocationMeta(t, selfLocation, roomID, "player2", "みな", 0, false, playerColorPalette[1])
 	assertLocationNoCoords(t, selfLocation)
 }
 
@@ -1040,8 +1152,8 @@ func TestResetAfterResultKeepsConnectedPlayersAndAllowsRestart(t *testing.T) {
 	if len(resetWaiting.Players) != 2 {
 		t.Fatalf("reset後は接続中2人だけがwaitingに戻る想定です: %+v", resetWaiting.Players)
 	}
-	assertWaitingPlayer(t, resetWaiting, "player1", "はるき", "")
-	assertWaitingPlayer(t, resetWaiting, "player2", "みな", "")
+	assertWaitingPlayer(t, resetWaiting, "player1", "はるき", playerColorPalette[0])
+	assertWaitingPlayer(t, resetWaiting, "player2", "みな", playerColorPalette[1])
 	readUntilEvent(t, runnerConn, "waiting")
 
 	waitFor(t, func() bool {
@@ -1053,12 +1165,16 @@ func TestResetAfterResultKeepsConnectedPlayersAndAllowsRestart(t *testing.T) {
 	})
 	assertDBPlayerExists(t, db, roomID, "player3", false)
 
+	expectedColors := map[string]string{
+		"player1": playerColorPalette[0],
+		"player2": playerColorPalette[1],
+	}
 	for _, userID := range []string{"player1", "player2"} {
 		var player models.Player
 		if err := db.Where("room_id = ? AND user_id = ?", roomID, userID).First(&player).Error; err != nil {
 			t.Fatalf("reset後のプレイヤー取得失敗: %v", err)
 		}
-		if player.Role != 0 || player.IsCaught || player.Color != "" || player.HasLocation {
+		if player.Role != 0 || player.IsCaught || player.Color != expectedColors[userID] || player.HasLocation {
 			t.Fatalf("reset後のプレイヤー状態が不正です: %+v", player)
 		}
 	}

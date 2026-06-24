@@ -40,7 +40,7 @@ DB に保存するデータ構造だけを持ちます。
 - `Room`
   - 部屋 ID
   - ゲーム状態
-  - 制限時間、鬼の人数、同期間隔、猶予時間
+  - 制限時間、鬼の人数、最大参加人数、同期間隔、猶予時間
 - `Player`
   - room ごとの user
   - 名前、役割、捕獲状態、位置、色
@@ -71,6 +71,7 @@ REST API の routing は `main.go` に残し、`ws` には WebSocket とゲー�
 - 部屋設定
   - `time_limit`
   - `oni_count`
+  - `max_players`
   - `area_size`
   - `sync_interval`
   - `grace_period`
@@ -89,6 +90,7 @@ REST API の routing は `main.go` に残し、`ws` には WebSocket とゲー�
 
 - 現在接続中の WebSocket client
 - 部屋ごとのゲーム進行中フラグ
+- `start_roulette` で確定した pending 鬼 assignment
 - 猶予終了時刻
 - 本編開始時刻
 - ゲームループが動いているかどうか
@@ -106,13 +108,21 @@ REST API の routing は `main.go` に残し、`ws` には WebSocket とゲー�
 | `1` | 進行中 |
 | `2` | 終了 |
 
+ルーレット時:
+
+- host の `start_roulette` action を受け取る
+- 待機中、2 人以上、鬼人数 1 から 3、全員鬼ではないことを検証する
+- 接続中 player から `selected_oni_user_ids` を確定し、`roulette_order` とともに `roulette_started` で配信する
+- pending assignment は `RoomState` に保持し、二重 `start_roulette` では同じ結果を再送する
+
 開始時:
 
 - `oni_users` 付きの `start` action を受け取る
+- pending assignment があれば、frontend から送られた `oni_users` より pending の `selected_oni_user_ids` を優先する
 - `RoomState.Status` を `1` にする
 - DB の `rooms.status` も `1` にする
 - `oni_users` に含まれる接続中 player を鬼、その他を逃走者にする
-- 鬼の color を `black` に上書きし、DB の `players` に保存する
+- 鬼の表示色は接続中メモリでは `black` にする。DB の `players.color` は再戦時の色復元のため元の選択色を保持する
 - 各 client に `start` event を送る
 - 猶予時間後に `game_active` event を送る
 

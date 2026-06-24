@@ -24,6 +24,13 @@ func cleanGameSettings(timeLimit, syncInterval, gracePeriod int) (int, int, int)
 	return timeLimit, syncInterval, gracePeriod
 }
 
+func cleanMaxPlayers(maxPlayers int) int {
+	if maxPlayers < minRoomPlayers || maxPlayers > maxRoomPlayers {
+		return defaultMaxPlayers
+	}
+	return maxPlayers
+}
+
 func sendToClient(client *Client, msg interface{}) error {
 	client.mu.Lock()
 	defer client.mu.Unlock()
@@ -58,6 +65,7 @@ func (room *RoomState) roomSettingsMessage() RoomSettingsMessage {
 	defer room.mu.RUnlock()
 
 	timeLimit, syncInterval, gracePeriod := cleanGameSettings(room.TimeLimit, room.SyncInterval, room.GracePeriod)
+	maxPlayers := cleanMaxPlayers(room.MaxPlayers)
 	var areaCenter *AreaCenterVal
 	if room.HasAreaCenter {
 		areaCenter = &AreaCenterVal{
@@ -70,6 +78,7 @@ func (room *RoomState) roomSettingsMessage() RoomSettingsMessage {
 		Event:          "room_settings",
 		TimeLimit:      timeLimit,
 		OniCount:       room.OniCount,
+		MaxPlayers:     maxPlayers,
 		AreaSize:       room.AreaSize,
 		SyncInterval:   syncInterval,
 		GracePeriod:    gracePeriod,
@@ -169,10 +178,17 @@ func (room *RoomState) hostUserID() string {
 	return room.HostUserID
 }
 
+func (room *RoomState) maxPlayers() int {
+	room.mu.RLock()
+	defer room.mu.RUnlock()
+	return cleanMaxPlayers(room.MaxPlayers)
+}
+
 func (room *RoomState) waitingMessage() OutgoingMessage {
 	return OutgoingMessage{
 		Event:      "waiting",
 		HostUserID: room.hostUserID(),
+		MaxPlayers: room.maxPlayers(),
 		Players:    room.waitingPlayers(),
 	}
 }

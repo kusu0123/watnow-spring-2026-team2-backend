@@ -239,6 +239,7 @@ func TestPutRoomSettingsBroadcastsAndSavesAreaCenter(t *testing.T) {
 	putRoomSettings(t, server, roomID, `{
 		"time_limit": 900,
 		"oni_count": 1,
+		"max_players": 8,
 		"area_size": "500m",
 		"sync_interval": 180,
 		"grace_period": 120,
@@ -250,6 +251,9 @@ func TestPutRoomSettingsBroadcastsAndSavesAreaCenter(t *testing.T) {
 	settings2 := readHTTPTestUntilEvent(t, wsConn2, "room_settings")
 	assertHTTPTestRoomSettings(t, settings1, 900, 1, "500m", 180, 120, 34.0, 135.0)
 	assertHTTPTestRoomSettings(t, settings2, 900, 1, "500m", 180, 120, 34.0, 135.0)
+	if settings1.MaxPlayers != 8 || settings2.MaxPlayers != 8 {
+		t.Fatalf("max_playersがbroadcastされていません: settings1=%+v settings2=%+v", settings1, settings2)
+	}
 	if !settings1.MissionEnabled || !settings2.MissionEnabled {
 		t.Fatalf("mission_enabledがbroadcastされていません: settings1=%+v settings2=%+v", settings1, settings2)
 	}
@@ -261,6 +265,9 @@ func TestPutRoomSettingsBroadcastsAndSavesAreaCenter(t *testing.T) {
 	if !savedRoom.MissionEnabled {
 		t.Fatalf("DBにmission_enabledが保存されていません: %+v", savedRoom)
 	}
+	if savedRoom.MaxPlayers != 8 {
+		t.Fatalf("DBにmax_playersが保存されていません: %+v", savedRoom)
+	}
 	if !savedRoom.HasAreaCenter || math.Abs(savedRoom.AreaCenterLat-34.0) > 0.000001 || math.Abs(savedRoom.AreaCenterLng-135.0) > 0.000001 {
 		t.Fatalf("DBに保存されたarea_centerが不正です: %+v", savedRoom)
 	}
@@ -270,10 +277,14 @@ func TestPutRoomSettingsBroadcastsAndSavesAreaCenter(t *testing.T) {
 	if !stateSettings.MissionEnabled {
 		t.Fatalf("RoomStateにmission_enabledが反映されていません: %+v", stateSettings)
 	}
+	if stateSettings.MaxPlayers != 8 {
+		t.Fatalf("RoomStateにmax_playersが反映されていません: %+v", stateSettings)
+	}
 	assertHTTPTestRoomSettings(t, ws.OutgoingMessage{
 		Event:          stateSettings.Event,
 		TimeLimit:      stateSettings.TimeLimit,
 		OniCount:       stateSettings.OniCount,
+		MaxPlayers:     stateSettings.MaxPlayers,
 		AreaSize:       stateSettings.AreaSize,
 		SyncInterval:   stateSettings.SyncInterval,
 		GracePeriod:    stateSettings.GracePeriod,
@@ -354,6 +365,18 @@ func TestPutRoomSettingsRejectsInvalidStep3Values(t *testing.T) {
 			body: `{"time_limit":900,"oni_count":4,"area_size":"500m","sync_interval":180,"grace_period":120}`,
 		},
 		{
+			name: "maxPlayersOne",
+			body: `{"time_limit":900,"oni_count":1,"max_players":1,"area_size":"500m","sync_interval":180,"grace_period":120}`,
+		},
+		{
+			name: "maxPlayersSixteen",
+			body: `{"time_limit":900,"oni_count":1,"max_players":16,"area_size":"500m","sync_interval":180,"grace_period":120}`,
+		},
+		{
+			name: "maxPlayersEqualsOniCount",
+			body: `{"time_limit":900,"oni_count":2,"max_players":2,"area_size":"500m","sync_interval":180,"grace_period":120}`,
+		},
+		{
 			name: "invalidTimeLimit",
 			body: `{"time_limit":300,"oni_count":1,"area_size":"500m","sync_interval":180,"grace_period":120}`,
 		},
@@ -380,5 +403,45 @@ func TestPutRoomSettingsRejectsInvalidStep3Values(t *testing.T) {
 				t.Fatalf("不正な設定が拒否されていません: status=%d body=%s", resp.StatusCode, payload)
 			}
 		})
+	}
+}
+
+func TestPutRoomSettingsRejectsMaxPlayersBelowCurrentPlayers(t *testing.T) {
+	roomID := "maxPlayersCurrentRoom"
+	db, server, _, cleanup := newHTTPTestServer(t, models.Room{
+		ID:           roomID,
+		Status:       0,
+		TimeLimit:    900,
+		OniCount:     1,
+		MaxPlayers:   6,
+		AreaSize:     "500m",
+		SyncInterval: 180,
+		GracePeriod:  120,
+	})
+	defer cleanup()
+
+	for _, userID := range []string{"player1", "player2", "player3"} {
+		if err := db.Create(&models.Player{
+			ID:     roomID + ":" + userID,
+			RoomID: roomID,
+			UserID: userID,
+			Name:   userID,
+		}).Error; err != nil {
+			t.Fatalf("テストプレイヤー作成失敗: %v", err)
+		}
+	}
+
+	resp := putRoomSettingsRaw(t, server, roomID, `{
+		"time_limit": 900,
+		"oni_count": 1,
+		"max_players": 2,
+		"area_size": "500m",
+		"sync_interval": 180,
+		"grace_period": 120
+	}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		payload, _ := io.ReadAll(resp.Body)
+		t.Fatalf("現在人数未満のmax_playersが拒否されていません: status=%d body=%s", resp.StatusCode, payload)
 	}
 }

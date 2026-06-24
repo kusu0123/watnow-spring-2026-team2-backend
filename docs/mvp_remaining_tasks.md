@@ -16,8 +16,8 @@
 | capture 確認 UI | P0 | frontend | request_id 導入、photo_url 送信 | frontend | 対象逃走者が写真、申請者、残り時間を見て承認/拒否できる |
 | 鬼人数 UI max3 修正 | P0 | frontend | backend validation 確認 | frontend | UI 上で鬼人数が 1 から 3 人に制限され、全員鬼を選べない |
 | 2 端末 capture E2E | P0 | frontend / backend | capture 確認 UI、30 秒 expire | frontend + backend | 2 台で申請、承認、拒否、expire、result 到達を確認済み |
-| player color 同期 | P0 | backend / frontend | waiting payload | backend + frontend | `update_color` 後、waiting / sync に最新 color が反映される |
-| room settings 同期 | P0 | backend / frontend | settings PUT | backend + frontend | `mission_enabled` を含む最新 `room_settings` が参加者へ届く |
+| player color 同期 | P0 | backend / frontend | waiting payload | backend + frontend | backend は reset/replay 時の color 維持と join 時の空・黒・重複色自動割当まで対応済み。frontend 実機確認で完了 |
+| room settings 同期 | P0 | backend / frontend | settings PUT | backend + frontend | backend は `mission_enabled` と `max_players` を含む最新 `room_settings` 配信まで対応済み。frontend 実機確認で完了 |
 
 ## P1
 
@@ -27,7 +27,7 @@
 | game_results / player_results 保存 | P1 | backend | result contract 確定 | backend | ゲーム終了時に game result と player result を保存できる |
 | result survival_seconds / captured_at 追加 | P1 | backend / frontend | capture result flow | backend + frontend | result payload に逃走者の `survival_seconds` と捕獲済みの `captured_at` が入る |
 | winner / end_reason 追加 | P1 | backend / frontend | result 保存方針 | backend + frontend | result payload に勝者と終了理由が入り、frontend が優先表示できる |
-| roulette 同期 | P1 | backend / frontend | host / waiting flow | backend + frontend | host の `start_roulette` で guest に `roulette_started` が届く |
+| roulette 同期 | P1 | backend / frontend | host / waiting flow | backend + frontend | backend は `selected_oni_user_ids` / `roulette_order` / `starts_at` / `duration_ms` と start role 整合まで対応済み。frontend 停止演出反映で完了 |
 | result 画面拡張 | P1 | frontend | winner / end_reason / survival_seconds 追加 | frontend | 勝者、終了理由、生存秒数、写真を表示できる |
 | MVP 外 UI 整理 | P1 | frontend | MVP scope 確定 | frontend | mission / chat / area shrink など未実装 UI が誤操作を誘導しない |
 | 位置未取得時の 0,0 対策 | P1 | frontend / backend | sync payload 確認 | frontend + backend | 初期値 `0,0` を実位置として表示しない。未取得状態を UI / payload で区別できる |
@@ -39,13 +39,12 @@
 | result 履歴 | P2 | frontend / backend | game_results / player_results 保存 | frontend + backend | 過去 game result を取得・表示できる |
 | 切断 30 秒判定 | P2 | backend / frontend | WebSocket 切断方針 | backend + frontend | 通常切断後 30 秒以内は復帰扱い、超過後の扱いが明確になる |
 | host 権限強化 | P2 | backend / frontend | user / host 方針 | backend + frontend | backend は `start` / `start_roulette` をhostのみに制限済み。settings / reset の権限方針は別途確定 |
-| color 被り防止 | P2 | backend / frontend | update_color | backend + frontend | backend は `update_color` の重複と黒予約を拒否済み。frontend は使用中色のdisabled表示を行う |
+| color 被り防止 | P2 | backend / frontend | update_color / join | backend + frontend | backend は `update_color` の重複と黒予約拒否、join 時の安全色自動割当まで対応済み。frontend は使用中色のdisabled表示を行う |
 | mission | P2 | frontend / backend | MVP 後 scope | frontend + backend | mission payload と UI が定義・実装される |
 | chat | P2 | frontend / backend | MVP 後 scope | frontend + backend | chat payload と UI が定義・実装される |
 | area shrink | P2 | frontend / backend | area rule 方針 | frontend + backend | エリア縮小ルール、payload、地図表示が定義・実装される |
 
 ## 次 PR 候補
 
-- `docs/product_rules.md` に capture / result のルールを反映する。
+- `docs/product_rules.md` に capture / result の詳細ルールを反映する。
 - `docs/architecture.md` に result 保存 model と capture request model を追記する。
-- 今回の PR では上記 2 ファイルは変更しません。
