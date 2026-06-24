@@ -510,7 +510,10 @@ func transferRoomHostIfNeeded(db *gorm.DB, roomID, leavingUserID string) (string
 func (room *RoomState) isHost(userID string) bool {
 	room.mu.RLock()
 	defer room.mu.RUnlock()
-	return room.HostUserID == "" || room.HostUserID == userID
+	if room.HostUserID == "" {
+		return false
+	}
+	return room.HostUserID == userID
 }
 
 func oniUsersForRoom(db *gorm.DB, roomID string) ([]string, error) {
@@ -527,7 +530,7 @@ func oniUsersForRoom(db *gorm.DB, roomID string) ([]string, error) {
 }
 
 func sendRoomSettingsToClient(roomID string, client *Client, room *RoomState, userID string) {
-	if err := sendToClient(client, room.roomSettingsMessage()); err != nil {
+	if err := sendToClient(client, room.RoomSettingsMessage()); err != nil {
 		log.Printf("[Info] Room: %s | User: %s | room_settings送信に失敗しました: %v\n", roomID, userID, err)
 	}
 }
@@ -661,7 +664,24 @@ func (h *Hub) Unregister(roomID string, client *Client, db *gorm.DB) {
 	userID := client.UserID
 	client.mu.Unlock()
 
-	if !leftExplicitly && (status == 0 || status == 2) && userID != "" && db != nil {
+	hasActiveConnection := false
+	if userID != "" {
+		room.mu.Lock()
+		for c := range room.Clients {
+			if c != client {
+				c.mu.Lock()
+				sameUser := c.UserID == userID
+				c.mu.Unlock()
+				if sameUser {
+					hasActiveConnection = true
+					break
+				}
+			}
+		}
+		room.mu.Unlock()
+	}
+
+	if !hasActiveConnection && !leftExplicitly && (status == 0 || status == 2) && userID != "" && db != nil {
 		if err := db.Where("room_id = ? AND user_id = ?", roomID, userID).Delete(&models.Player{}).Error; err != nil {
 			log.Printf("[Error] Room: %s | User: %s | waiting切断後のプレイヤー削除に失敗しました: %v\n", roomID, userID, err)
 		} else {
@@ -740,7 +760,7 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 
 	roomState := GameHub.GetOrCreateRoom(roomID)
 	roomState.mu.RLock()
-	shouldSyncRoom := roomState.Status == 0 && !roomState.IsGMLoopActive
+	shouldSyncRoom := roomState.Status == 0 && roomState.HostUserID == "" && !roomState.IsGMLoopActive
 	roomState.mu.RUnlock()
 
 	if shouldSyncRoom {
@@ -781,6 +801,9 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				_ = client.Conn.SetWriteDeadline(time.Time{})
 				client.mu.Unlock()
 				if err != nil {
+					client.mu.Lock()
+					_ = client.Conn.Close()
+					client.mu.Unlock()
 					return // 送信失敗＝切断されているので終了
 				}
 			}

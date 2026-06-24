@@ -60,7 +60,7 @@ func (room *RoomState) Broadcast(msg interface{}) {
 	}
 }
 
-func (room *RoomState) roomSettingsMessage() RoomSettingsMessage {
+func (room *RoomState) RoomSettingsMessage() RoomSettingsMessage {
 	room.mu.RLock()
 	defer room.mu.RUnlock()
 
@@ -85,10 +85,6 @@ func (room *RoomState) roomSettingsMessage() RoomSettingsMessage {
 		MissionEnabled: room.MissionEnabled,
 		AreaCenter:     areaCenter,
 	}
-}
-
-func (room *RoomState) RoomSettingsMessage() RoomSettingsMessage {
-	return room.roomSettingsMessage()
 }
 
 func (room *RoomState) BroadcastRoomSettings() {

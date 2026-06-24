@@ -1969,3 +1969,40 @@ func TestCaptureRequestValidatesPhotoURL(t *testing.T) {
 	// エラーではなく、ターゲットへ capture_checking が飛ぶはず
 	_ = readUntilEvent(t, runnerConn, "capture_checking")
 }
+
+func TestReconnectionRaceCondition(t *testing.T) {
+	roomID := "reconnect_race_room"
+	db, baseURL, cleanup := newTestServer(t, models.Room{
+		ID:        roomID,
+		Status:    0,
+		TimeLimit: 900,
+	})
+	defer cleanup()
+
+	// 1. クライアント1で接続して入室
+	wsConn1 := connectToRoom(t, baseURL, roomID)
+	sendJSON(t, wsConn1, `{"action":"join","user_id":"player1","name":"Player 1","color":"#0000FF"}`)
+	_ = readUntilEvent(t, wsConn1, "waiting")
+
+	// DBにプレイヤーが存在することを確認
+	assertDBPlayerExists(t, db, roomID, "player1", true)
+
+	// 2. 同じ userID で新しいコネクション (wsConn2) から接続して入室
+	wsConn2 := connectToRoom(t, baseURL, roomID)
+	sendJSON(t, wsConn2, `{"action":"join","user_id":"player1","name":"Player 1","color":"#0000FF"}`)
+	_ = readUntilEvent(t, wsConn2, "waiting")
+
+	// 古いコネクション (wsConn1) が切断されるのを待つ
+	time.Sleep(100 * time.Millisecond)
+
+	// 3. 再接続したコネクションが正常に生きている & DBから削除されていないことを確認
+	assertDBPlayerExists(t, db, roomID, "player1", true)
+
+	// wsConn2 が生きており、何らかのメッセージが送れる・受信できることを確認
+	sendJSON(t, wsConn2, `{"action":"update_color","color":"#3B82F6"}`)
+	msg := readUntilEvent(t, wsConn2, "waiting")
+	player, ok := findWaitingPlayer(msg.Players, "player1")
+	if !ok || player.Color != "#3B82F6" {
+		t.Fatalf("再接続後のカラー更新が反映されていません: got=%+v", msg.Players)
+	}
+}
