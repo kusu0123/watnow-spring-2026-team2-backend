@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"math/rand"
 	"net/http"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,10 +26,13 @@ var upgrader = websocket.Upgrader{
 }
 
 const (
-	minStartPlayers = 2
-	maxRoomPlayers  = 15
-	minOniUsers     = 1
-	maxOniUsers     = 3
+	minStartPlayers    = 2
+	minRoomPlayers     = 2
+	defaultMaxPlayers  = 6
+	maxRoomPlayers     = 15
+	minOniUsers        = 1
+	maxOniUsers        = 3
+	rouletteDurationMS = 3000
 )
 
 type Client struct {
@@ -48,24 +54,29 @@ type Client struct {
 }
 
 type RoomState struct {
-	Status         int
-	TimeLimit      int
-	OniCount       int // 追加
-	AreaSize       string
-	SyncInterval   int // 追加
-	GracePeriod    int // 追加
-	MissionEnabled bool
-	AreaCenterLat  float64
-	AreaCenterLng  float64
-	HasAreaCenter  bool
-	HostUserID     string
-	StartAt        time.Time
-	ActiveAt       time.Time
-	IsGameActive   bool
-	Clients        map[*Client]bool
-	IsGMLoopActive bool // 追加：GMの重複起動防止
-	LoopID         uint64
-	mu             sync.RWMutex
+	Status                    int
+	TimeLimit                 int
+	OniCount                  int // 追加
+	MaxPlayers                int
+	AreaSize                  string
+	SyncInterval              int // 追加
+	GracePeriod               int // 追加
+	MissionEnabled            bool
+	AreaCenterLat             float64
+	AreaCenterLng             float64
+	HasAreaCenter             bool
+	HostUserID                string
+	StartAt                   time.Time
+	ActiveAt                  time.Time
+	IsGameActive              bool
+	Clients                   map[*Client]bool
+	IsGMLoopActive            bool // 追加：GMの重複起動防止
+	LoopID                    uint64
+	PendingOniUserIDs         []string
+	PendingRouletteOrder      []string
+	PendingRouletteStartsAt   time.Time
+	PendingRouletteDurationMS int
+	mu                        sync.RWMutex
 }
 
 type Hub struct {
@@ -120,9 +131,13 @@ func (h *Hub) UpdateRoomSettings(roomID string, timeLimit, oniCount int, areaSiz
 	defer room.mu.Unlock()
 	room.TimeLimit = timeLimit
 	room.OniCount = oniCount
+	if room.MaxPlayers == 0 {
+		room.MaxPlayers = defaultMaxPlayers
+	}
 	room.AreaSize = areaSize
 	room.SyncInterval = syncInterval
 	room.GracePeriod = gracePeriod
+	clearPendingRouletteLocked(room)
 }
 
 func (h *Hub) UpdateRoomSettingsFromModel(room models.Room) *RoomState {
@@ -134,6 +149,7 @@ func (h *Hub) UpdateRoomSettingsFromModel(room models.Room) *RoomState {
 	roomState.Status = room.Status
 	roomState.TimeLimit = timeLimit
 	roomState.OniCount = room.OniCount
+	roomState.MaxPlayers = cleanMaxPlayers(room.MaxPlayers)
 	roomState.AreaSize = room.AreaSize
 	roomState.SyncInterval = syncInterval
 	roomState.GracePeriod = gracePeriod
@@ -142,6 +158,7 @@ func (h *Hub) UpdateRoomSettingsFromModel(room models.Room) *RoomState {
 	roomState.AreaCenterLng = room.AreaCenterLng
 	roomState.HasAreaCenter = room.HasAreaCenter
 	roomState.HostUserID = room.HostUserID
+	clearPendingRouletteLocked(roomState)
 	return roomState
 }
 
@@ -152,9 +169,10 @@ func (h *Hub) GetOrCreateRoom(roomID string) *RoomState {
 	room, ok := h.Rooms[roomID]
 	if !ok {
 		room = &RoomState{
-			Status:    0,
-			TimeLimit: 900,
-			Clients:   make(map[*Client]bool),
+			Status:     0,
+			TimeLimit:  900,
+			MaxPlayers: defaultMaxPlayers,
+			Clients:    make(map[*Client]bool),
 		}
 		h.Rooms[roomID] = room
 	}
@@ -224,6 +242,27 @@ func isReservedPlayerColor(color string) bool {
 	return strings.EqualFold(color, "#000000") || strings.EqualFold(color, "black")
 }
 
+var (
+	errNoAvailablePlayerColor = errors.New("利用可能なカラーがありません")
+	playerColorPalette        = []string{
+		"#EF4444",
+		"#F97316",
+		"#F59E0B",
+		"#84CC16",
+		"#22C55E",
+		"#14B8A6",
+		"#06B6D4",
+		"#0EA5E9",
+		"#3B82F6",
+		"#6366F1",
+		"#8B5CF6",
+		"#A855F7",
+		"#D946EF",
+		"#EC4899",
+		"#F43F5E",
+	}
+)
+
 func colorUsedByOtherPlayer(db *gorm.DB, roomID, userID, color string) (bool, error) {
 	var players []models.Player
 	if err := db.Where("room_id = ?", roomID).Find(&players).Error; err != nil {
@@ -235,6 +274,119 @@ func colorUsedByOtherPlayer(db *gorm.DB, roomID, userID, color string) (bool, er
 		}
 	}
 	return false, nil
+}
+
+func usedPlayerColors(db *gorm.DB, roomID, userID string) (map[string]bool, error) {
+	var players []models.Player
+	if err := db.Where("room_id = ?", roomID).Find(&players).Error; err != nil {
+		return nil, err
+	}
+
+	used := make(map[string]bool, len(players))
+	for _, player := range players {
+		if player.UserID == userID {
+			continue
+		}
+		normalizedColor, ok := normalizeHexColor(player.Color)
+		if ok {
+			used[normalizedColor] = true
+		}
+	}
+	return used, nil
+}
+
+func firstAvailablePlayerColor(db *gorm.DB, roomID, userID string) (string, error) {
+	used, err := usedPlayerColors(db, roomID, userID)
+	if err != nil {
+		return "", err
+	}
+	for _, color := range playerColorPalette {
+		if !used[color] {
+			return color, nil
+		}
+	}
+	return "", errNoAvailablePlayerColor
+}
+
+func safeJoinColor(db *gorm.DB, roomID, userID, requestedColor string) (string, error) {
+	if requestedColor == "" || isReservedPlayerColor(requestedColor) {
+		return firstAvailablePlayerColor(db, roomID, userID)
+	}
+
+	used, err := colorUsedByOtherPlayer(db, roomID, userID, requestedColor)
+	if err != nil {
+		return "", err
+	}
+	if used {
+		return firstAvailablePlayerColor(db, roomID, userID)
+	}
+	return requestedColor, nil
+}
+
+func clearPendingRouletteLocked(room *RoomState) {
+	room.PendingOniUserIDs = nil
+	room.PendingRouletteOrder = nil
+	room.PendingRouletteStartsAt = time.Time{}
+	room.PendingRouletteDurationMS = 0
+}
+
+func copyStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	return append([]string(nil), values...)
+}
+
+func rouletteStartedMessage(order, selectedOniUserIDs []string, startsAt time.Time, durationMS int) OutgoingMessage {
+	if startsAt.IsZero() {
+		startsAt = time.Now().UTC()
+	}
+	if durationMS <= 0 {
+		durationMS = rouletteDurationMS
+	}
+	return OutgoingMessage{
+		Event:              "roulette_started",
+		RouletteOrder:      copyStrings(order),
+		SelectedOniUserIDs: copyStrings(selectedOniUserIDs),
+		StartsAt:           startsAt.UTC().Format(time.RFC3339Nano),
+		DurationMS:         durationMS,
+	}
+}
+
+func pendingRouletteMessageLocked(room *RoomState) (OutgoingMessage, bool) {
+	if len(room.PendingOniUserIDs) == 0 {
+		return OutgoingMessage{}, false
+	}
+	return rouletteStartedMessage(
+		room.PendingRouletteOrder,
+		room.PendingOniUserIDs,
+		room.PendingRouletteStartsAt,
+		room.PendingRouletteDurationMS,
+	), true
+}
+
+func connectedUserIDsLocked(room *RoomState) []string {
+	userIDs := make([]string, 0, len(room.Clients))
+	for c := range room.Clients {
+		c.mu.Lock()
+		userID := c.UserID
+		c.mu.Unlock()
+		if userID != "" {
+			userIDs = append(userIDs, userID)
+		}
+	}
+	sort.Strings(userIDs)
+	return userIDs
+}
+
+func selectOniUserIDs(userIDs []string, oniCount int) []string {
+	candidates := copyStrings(userIDs)
+	rand.New(rand.NewSource(time.Now().UnixNano())).Shuffle(len(candidates), func(i, j int) {
+		candidates[i], candidates[j] = candidates[j], candidates[i]
+	})
+	selected := candidates[:oniCount]
+	sort.Strings(selected)
+	return copyStrings(selected)
 }
 
 func syncRoomHost(room *RoomState, hostUserID string) {
@@ -361,7 +513,7 @@ func sendActiveStateToClient(roomID string, client *Client, room *RoomState, db 
 	}
 }
 
-func resetRoomForReplay(roomID string, room *RoomState, db *gorm.DB) error {
+func resetRoomForReplay(roomID string, room *RoomState, db *gorm.DB) (map[string]string, error) {
 	clients := room.clientList()
 	connectedUserIDs := make([]string, 0, len(clients))
 	for _, client := range clients {
@@ -373,18 +525,25 @@ func resetRoomForReplay(roomID string, room *RoomState, db *gorm.DB) error {
 		}
 	}
 
-	return db.Transaction(func(tx *gorm.DB) error {
+	preservedColors := make(map[string]string, len(connectedUserIDs))
+	return preservedColors, db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Model(&models.Room{}).Where("id = ?", roomID).Update("status", 0).Error; err != nil {
 			return err
 		}
 		if len(connectedUserIDs) > 0 {
+			var players []models.Player
+			if err := tx.Where("room_id = ? AND user_id IN ?", roomID, connectedUserIDs).Find(&players).Error; err != nil {
+				return err
+			}
+			for _, player := range players {
+				preservedColors[player.UserID] = player.Color
+			}
 			if err := tx.Model(&models.Player{}).Where("room_id = ? AND user_id IN ?", roomID, connectedUserIDs).Updates(map[string]interface{}{
 				"role":         0,
 				"is_caught":    false,
 				"lat":          0,
 				"lng":          0,
 				"has_location": false,
-				"color":        "",
 				"photo_url":    "",
 				"captured_at":  nil,
 			}).Error; err != nil {
@@ -438,6 +597,9 @@ func (h *Hub) Unregister(roomID string, client *Client, db *gorm.DB) {
 			} else {
 				syncRoomHost(room, newHostUserID)
 			}
+			room.mu.Lock()
+			clearPendingRouletteLocked(room)
+			room.mu.Unlock()
 			if !isEmpty {
 				room.Broadcast(room.waitingMessage())
 			}
@@ -583,30 +745,19 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 			msg.Name = normalizedName
 
 			if msg.Color != "" {
-				normalizedColor, ok := normalizeHexColor(msg.Color)
-				if !ok {
-					sendError(client, "カラーの形式が不正です（例: #FF0000）")
-					continue
+				if strings.EqualFold(strings.TrimSpace(msg.Color), "black") {
+					msg.Color = "#000000"
+				} else {
+					normalizedColor, ok := normalizeHexColor(msg.Color)
+					if !ok {
+						sendError(client, "カラーの形式が不正です（例: #FF0000）")
+						continue
+					}
+					msg.Color = normalizedColor
 				}
-				if isReservedPlayerColor(normalizedColor) {
-					sendError(client, "黒は鬼用のカラーです")
-					continue
-				}
-				msg.Color = normalizedColor
 			}
 
 			status := roomStatus(room)
-			if status == 0 && msg.Color != "" {
-				used, err := colorUsedByOtherPlayer(db, roomID, msg.UserID, msg.Color)
-				if err != nil {
-					sendError(client, "プレイヤーカラーの確認に失敗しました")
-					continue
-				}
-				if used {
-					sendError(client, "このカラーはすでに使われています")
-					continue
-				}
-			}
 
 			var player models.Player
 			err := db.Where("room_id = ? AND user_id = ?", roomID, msg.UserID).First(&player).Error
@@ -621,8 +772,19 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 					sendError(client, "プレイヤー情報の取得に失敗しました")
 					continue
 				}
-				if count >= maxRoomPlayers {
-					sendError(client, "参加人数は15人までです")
+				maxPlayers := room.maxPlayers()
+				if count >= int64(maxPlayers) {
+					sendError(client, "参加人数は"+strconv.Itoa(maxPlayers)+"人までです")
+					continue
+				}
+
+				joinColor, err := safeJoinColor(db, roomID, msg.UserID, msg.Color)
+				if err != nil {
+					if errors.Is(err, errNoAvailablePlayerColor) {
+						sendError(client, err.Error())
+					} else {
+						sendError(client, "プレイヤーカラーの確認に失敗しました")
+					}
 					continue
 				}
 
@@ -631,12 +793,15 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 					RoomID: roomID,
 					UserID: msg.UserID,
 					Name:   msg.Name,
-					Color:  msg.Color,
+					Color:  joinColor,
 				}
 				if err := db.Create(&player).Error; err != nil {
 					sendError(client, "プレイヤー情報の保存に失敗しました")
 					continue
 				}
+				room.mu.Lock()
+				clearPendingRouletteLocked(room)
+				room.mu.Unlock()
 			} else if err != nil {
 				sendError(client, "プレイヤー情報の保存に失敗しました")
 				continue
@@ -646,9 +811,22 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 					player.Name = msg.Name
 					updates["name"] = msg.Name
 				}
-				if msg.Color != "" && msg.Color != player.Color {
-					player.Color = msg.Color
-					updates["color"] = msg.Color
+				joinColor := player.Color
+				if msg.Color != "" {
+					joinColor = msg.Color
+				}
+				joinColor, err := safeJoinColor(db, roomID, msg.UserID, joinColor)
+				if err != nil {
+					if errors.Is(err, errNoAvailablePlayerColor) {
+						sendError(client, err.Error())
+					} else {
+						sendError(client, "プレイヤーカラーの確認に失敗しました")
+					}
+					continue
+				}
+				if joinColor != player.Color {
+					player.Color = joinColor
+					updates["color"] = joinColor
 				}
 				if len(updates) > 0 {
 					if err := db.Model(&models.Player{}).Where("room_id = ? AND user_id = ?", roomID, msg.UserID).Updates(updates).Error; err != nil {
@@ -668,6 +846,9 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 			client.Lng = player.Lng
 			client.HasLocation = player.HasLocation
 			client.Color = player.Color
+			if status == 1 && player.Role == 1 {
+				client.Color = "black"
+			}
 			client.PhotoURL = player.PhotoURL
 			client.CapturedAt = player.CapturedAt
 			client.mu.Unlock()
@@ -784,11 +965,46 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				sendError(client, "ホストのみ実行できます")
 				continue
 			}
-			if roomStatus(room) != 0 {
+			room.mu.Lock()
+			if room.Status != 0 {
+				room.mu.Unlock()
 				sendError(client, "ルーレット開始は待機中のみ実行できます")
 				continue
 			}
-			room.Broadcast(OutgoingMessage{Event: "roulette_started"})
+			if rouletteMessage, ok := pendingRouletteMessageLocked(room); ok {
+				room.mu.Unlock()
+				room.Broadcast(rouletteMessage)
+				continue
+			}
+
+			rouletteOrder := connectedUserIDsLocked(room)
+			playerCount := len(rouletteOrder)
+			if playerCount < minStartPlayers {
+				room.mu.Unlock()
+				sendError(client, "ゲーム開始には2人以上必要です")
+				continue
+			}
+			if room.OniCount < minOniUsers || room.OniCount > maxOniUsers {
+				room.mu.Unlock()
+				sendError(client, "鬼は1〜3人で指定してください")
+				continue
+			}
+			if room.OniCount >= playerCount {
+				room.mu.Unlock()
+				sendError(client, "全員を鬼にはできません")
+				continue
+			}
+
+			selectedOniUserIDs := selectOniUserIDs(rouletteOrder, room.OniCount)
+			startsAt := time.Now().UTC()
+			room.PendingOniUserIDs = copyStrings(selectedOniUserIDs)
+			room.PendingRouletteOrder = copyStrings(rouletteOrder)
+			room.PendingRouletteStartsAt = startsAt
+			room.PendingRouletteDurationMS = rouletteDurationMS
+			rouletteMessage := rouletteStartedMessage(rouletteOrder, selectedOniUserIDs, startsAt, rouletteDurationMS)
+			room.mu.Unlock()
+
+			room.Broadcast(rouletteMessage)
 
 		case "start":
 			client.mu.Lock()
@@ -810,22 +1026,26 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				sendError(client, "ゲームはすでに開始しています")
 				continue
 			}
-			if len(msg.OniUsers) == 0 {
+
+			selectedOniUsers := copyStrings(room.PendingOniUserIDs)
+			if len(selectedOniUsers) == 0 {
+				selectedOniUsers = copyStrings(msg.OniUsers)
+			}
+			if len(selectedOniUsers) == 0 {
 				room.mu.Unlock()
 				sendError(client, "鬼に指定するユーザーを1人以上選択してください")
 				continue
 			}
-			if len(msg.OniUsers) > maxOniUsers {
+			if len(selectedOniUsers) > maxOniUsers {
 				room.mu.Unlock()
 				sendError(client, "鬼は1〜3人で指定してください")
 				continue
 			}
 
-			selectedOniUsers := append([]string(nil), msg.OniUsers...)
-			oniUsers := make(map[string]bool, len(msg.OniUsers))
+			oniUsers := make(map[string]bool, len(selectedOniUsers))
 			validStart := true
 			errorMessage := ""
-			for _, userID := range msg.OniUsers {
+			for _, userID := range selectedOniUsers {
 				if userID == "" {
 					validStart = false
 					errorMessage = "鬼に指定されたユーザーIDが不正です"
@@ -949,9 +1169,6 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 			saveFailed := false
 			for _, state := range playerStates {
 				updates := map[string]interface{}{"role": state.Role}
-				if state.Role == 1 {
-					updates["color"] = state.Color
-				}
 				if err := db.Model(&models.Player{}).Where("room_id = ? AND user_id = ?", roomID, state.UserID).Updates(updates).Error; err != nil {
 					saveFailed = true
 					break
@@ -973,6 +1190,10 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				sendError(client, "プレイヤー情報の保存に失敗しました")
 				continue
 			}
+
+			room.mu.Lock()
+			clearPendingRouletteLocked(room)
+			room.mu.Unlock()
 
 			// 開始通知（フロントエンド側はこの通知で猶予時間のカウントダウンUIを出す）
 			room.mu.RLock()
@@ -1004,7 +1225,8 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				continue
 			}
 
-			if err := resetRoomForReplay(roomID, room, db); err != nil {
+			preservedColors, err := resetRoomForReplay(roomID, room, db)
+			if err != nil {
 				sendError(client, "ルームのリセットに失敗しました")
 				continue
 			}
@@ -1016,6 +1238,7 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 			room.StartAt = time.Time{}
 			room.ActiveAt = time.Time{}
 			room.LoopID++
+			clearPendingRouletteLocked(room)
 			room.mu.Unlock()
 
 			for _, c := range room.clientList() {
@@ -1025,7 +1248,7 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				c.Lat = 0
 				c.Lng = 0
 				c.HasLocation = false
-				c.Color = ""
+				c.Color = preservedColors[c.UserID]
 				c.PhotoURL = ""
 				c.CapturedAt = nil
 				c.mu.Unlock()
@@ -1058,6 +1281,9 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 						continue
 					}
 					syncRoomHost(room, newHostUserID)
+					room.mu.Lock()
+					clearPendingRouletteLocked(room)
+					room.mu.Unlock()
 				}
 			}
 

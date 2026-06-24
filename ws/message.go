@@ -17,35 +17,41 @@ type IncomingMessage struct {
 
 // フロントエンドへ送信するデータ
 type OutgoingMessage struct {
-	Event          string             `json:"event"`
-	Message        string             `json:"message,omitempty"`
-	Players        []WaitingPlayerVal `json:"players,omitempty"`
-	HostUserID     string             `json:"host_user_id,omitempty"`
-	Role           *int               `json:"role,omitempty"`
-	TimeLimit      int                `json:"time_limit,omitempty"`
-	OniCount       int                `json:"oni_count,omitempty"`
-	AreaSize       string             `json:"area_size,omitempty"`
-	SyncInterval   int                `json:"sync_interval,omitempty"`
-	GracePeriod    int                `json:"grace_period,omitempty"`
-	MissionEnabled bool               `json:"mission_enabled"`
-	AreaCenter     *AreaCenterVal     `json:"area_center,omitempty"`
-	OniUsers       []string           `json:"oni_users,omitempty"`
-	TargetID       string             `json:"target_id,omitempty"`
-	AttackerName   string             `json:"attacker_name,omitempty"`
-	Approved       bool               `json:"approved,omitempty"`
-	PhotoURL       string             `json:"photo_url,omitempty"`
-	RequestID      string             `json:"request_id,omitempty"`
-	AttackerID     string             `json:"attacker_id,omitempty"`
-	ExpiresAt      string             `json:"expires_at,omitempty"`
-	Locations      []LocationVal      `json:"locations,omitempty"`
-	Survivors      []string           `json:"survivors,omitempty"`
-	Results        []ResultVal        `json:"results,omitempty"`
+	Event              string             `json:"event"`
+	Message            string             `json:"message,omitempty"`
+	Players            []WaitingPlayerVal `json:"players,omitempty"`
+	HostUserID         string             `json:"host_user_id,omitempty"`
+	Role               *int               `json:"role,omitempty"`
+	TimeLimit          int                `json:"time_limit,omitempty"`
+	OniCount           int                `json:"oni_count,omitempty"`
+	MaxPlayers         int                `json:"max_players,omitempty"`
+	AreaSize           string             `json:"area_size,omitempty"`
+	SyncInterval       int                `json:"sync_interval,omitempty"`
+	GracePeriod        int                `json:"grace_period,omitempty"`
+	MissionEnabled     bool               `json:"mission_enabled"`
+	AreaCenter         *AreaCenterVal     `json:"area_center,omitempty"`
+	OniUsers           []string           `json:"oni_users,omitempty"`
+	SelectedOniUserIDs []string           `json:"selected_oni_user_ids,omitempty"`
+	RouletteOrder      []string           `json:"roulette_order,omitempty"`
+	StartsAt           string             `json:"starts_at,omitempty"`
+	DurationMS         int                `json:"duration_ms,omitempty"`
+	TargetID           string             `json:"target_id,omitempty"`
+	AttackerName       string             `json:"attacker_name,omitempty"`
+	Approved           bool               `json:"approved,omitempty"`
+	PhotoURL           string             `json:"photo_url,omitempty"`
+	RequestID          string             `json:"request_id,omitempty"`
+	AttackerID         string             `json:"attacker_id,omitempty"`
+	ExpiresAt          string             `json:"expires_at,omitempty"`
+	Locations          []LocationVal      `json:"locations,omitempty"`
+	Survivors          []string           `json:"survivors,omitempty"`
+	Results            []ResultVal        `json:"results,omitempty"`
 }
 
 type RoomSettingsMessage struct {
 	Event          string         `json:"event"`
 	TimeLimit      int            `json:"time_limit"`
 	OniCount       int            `json:"oni_count"`
+	MaxPlayers     int            `json:"max_players"`
 	AreaSize       string         `json:"area_size"`
 	SyncInterval   int            `json:"sync_interval"`
 	GracePeriod    int            `json:"grace_period"`

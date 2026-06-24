@@ -10,6 +10,7 @@ type Room struct {
 	Status         int       `json:"status"` // 0:待機中, 1:進行中, 2:終了
 	TimeLimit      int       `json:"time_limit"`
 	OniCount       int       `json:"oni_count"`     // 追加：鬼の人数
+	MaxPlayers     int       `json:"max_players"`   // 追加：最大参加人数
 	AreaSize       string    `json:"area_size"`     // 追加：プレイエリアの広さ
 	SyncInterval   int       `json:"sync_interval"` // 追加：位置情報の公開頻度（秒）
 	GracePeriod    int       `json:"grace_period"`  // 追加：逃走猶予時間（秒）

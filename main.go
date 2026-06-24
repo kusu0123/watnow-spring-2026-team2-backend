@@ -55,12 +55,19 @@ type areaCenterInput struct {
 type roomSettingsInput struct {
 	TimeLimit      int              `json:"time_limit"`
 	OniCount       int              `json:"oni_count"`
+	MaxPlayers     *int             `json:"max_players"`
 	AreaSize       string           `json:"area_size"`
 	SyncInterval   int              `json:"sync_interval"`
 	GracePeriod    int              `json:"grace_period"`
 	MissionEnabled *bool            `json:"mission_enabled"`
 	AreaCenter     *areaCenterInput `json:"area_center"`
 }
+
+const (
+	defaultMaxPlayers  = 6
+	minMaxPlayers      = 2
+	absoluteMaxPlayers = 15
+)
 
 func isAllowedInt(value int, allowedValues ...int) bool {
 	for _, allowed := range allowedValues {
@@ -87,9 +94,10 @@ func setupRouter(db *gorm.DB) *gin.Engine {
 
 	r.POST("/rooms", func(c *gin.Context) {
 		room := models.Room{
-			ID:        models.GenerateRoomID(), // models/room.goで作った関数
-			Status:    0,
-			TimeLimit: 900,
+			ID:         models.GenerateRoomID(), // models/room.goで作った関数
+			Status:     0,
+			TimeLimit:  900,
+			MaxPlayers: defaultMaxPlayers,
 		}
 
 		if err := db.Create(&room).Error; err != nil {
@@ -130,6 +138,30 @@ func setupRouter(db *gorm.DB) *gin.Engine {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "鬼の人数は1〜3人で設定してください"})
 			return
 		}
+		maxPlayers := room.MaxPlayers
+		if maxPlayers < minMaxPlayers || maxPlayers > absoluteMaxPlayers {
+			maxPlayers = defaultMaxPlayers
+		}
+		if input.MaxPlayers != nil {
+			maxPlayers = *input.MaxPlayers
+		}
+		if maxPlayers < minMaxPlayers || maxPlayers > absoluteMaxPlayers {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "最大参加人数は2〜15人で設定してください"})
+			return
+		}
+		if maxPlayers <= input.OniCount {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "最大参加人数は鬼の人数より多くしてください"})
+			return
+		}
+		var currentPlayers int64
+		if err := db.Model(&models.Player{}).Where("room_id = ?", roomID).Count(&currentPlayers).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "プレイヤー情報の取得に失敗しました"})
+			return
+		}
+		if maxPlayers < int(currentPlayers) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "現在の参加人数より少ない最大参加人数にはできません"})
+			return
+		}
 		if !isAllowedInt(input.SyncInterval, 60, 180, 300) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "更新頻度は1分、3分、5分から選んでください"})
 			return
@@ -153,6 +185,7 @@ func setupRouter(db *gorm.DB) *gin.Engine {
 		updates := map[string]interface{}{
 			"time_limit":    input.TimeLimit,
 			"oni_count":     input.OniCount,
+			"max_players":   maxPlayers,
 			"area_size":     input.AreaSize,
 			"sync_interval": input.SyncInterval,
 			"grace_period":  input.GracePeriod,

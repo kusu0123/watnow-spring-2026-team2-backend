@@ -5,6 +5,7 @@
 ## 基本ルール
 
 - プレイヤーはルームに入室してゲームに参加します。
+- 各ルームの参加人数は `max_players` までです。`max_players` は 2 から 15 人で、初期値は 6 人です。
 - ゲーム開始時に各プレイヤーへ役割が割り当てられます。
 - 役割は `0` が逃走者、`1` が鬼です。
 - 鬼は逃走者に対して確保確認を送り、逃走者が承認すると確保成立になります。
@@ -26,13 +27,15 @@
 
 ゲーム開始時の流れは以下です。
 
-1. フロントから WebSocket で `action: "start"` と `oni_users` を送信します。
-2. サーバーが `oni_users` に含まれる参加中プレイヤーを鬼、その他を逃走者にします。
-3. 各プレイヤーへ `event: "start"` が届きます。
-4. `grace_period` が終わると `event: "game_active"` が届きます。
-5. 本編中は `sync_interval` ごとに `event: "sync"` が届きます。
+1. host が必要に応じて WebSocket で `action: "start_roulette"` を送信します。
+2. サーバーが鬼を確定し、`event: "roulette_started"` に `selected_oni_user_ids`、`roulette_order`、`starts_at`、`duration_ms` を含めて配信します。
+3. フロントから WebSocket で `action: "start"` を送信します。
+4. サーバーが `start_roulette` で確定した鬼を優先し、pending がない場合だけ `start.oni_users` を使います。
+5. 各プレイヤーへ `event: "start"` が届きます。
+6. `grace_period` が終わると `event: "game_active"` が届きます。
+7. 本編中は `sync_interval` ごとに `event: "sync"` が届きます。
 
-鬼に指定されたプレイヤーの色は、ゲーム開始時にサーバー側で `black` に上書きされます。
+鬼に指定されたプレイヤーの表示色は、ゲーム中の接続メモリでは `black` になります。DB の `player.color` は再戦時に待機色を復元できるよう、元の選択色を保持します。
 
 `start` と `game_active` は役割が違います。`start` はゲーム開始操作を受け付けた通知で、`game_active` は猶予時間後に本編を開始する通知です。
 
@@ -80,3 +83,7 @@
 WebSocket が切断されても、プレイヤー情報は DB に残ります。
 
 同じ `room_id` と `user_id` で `join` し直すと、保存済みの名前、役割、確保状態、位置、色をもとに復帰します。フロント側では `user_id` をリロード後も維持してください。
+
+## 再戦
+
+`result` 後に `reset` すると、接続中プレイヤーだけを残して待機中へ戻ります。役割、捕獲状態、位置情報、ゲーム中の写真URLはリセットされますが、プレイヤー名と `player.color` は維持されます。

@@ -52,6 +52,7 @@ POST /rooms
   "status": 0,
   "time_limit": 900,
   "oni_count": 0,
+  "max_players": 6,
   "area_size": "",
   "sync_interval": 0,
   "grace_period": 0,
@@ -64,6 +65,7 @@ POST /rooms
 - `room_id` は 4 桁の数字です。
 - 作成直後の `status` は `0` です。
 - `time_limit` の初期値は 900 秒です。
+- `max_players` の初期値は 6 人です。
 - `oni_count`, `sync_interval`, `grace_period` は必要に応じて設定更新 API で上書きします。
 
 ### ルーム設定更新
@@ -79,6 +81,7 @@ Content-Type: application/json
 {
   "time_limit": 900,
   "oni_count": 1,
+  "max_players": 6,
   "area_size": "school-yard",
   "sync_interval": 180,
   "grace_period": 120,
@@ -93,12 +96,14 @@ Content-Type: application/json
 
 - `time_limit`: 600 / 900 / 1800 秒
 - `oni_count`: 1 から 3 人
+- `max_players`: 2 から 15 人。現在参加人数未満、または `oni_count` 以下にはできません。
 - `area_size`: 50 文字以下
 - `sync_interval`: 60 / 180 / 300 秒
 - `grace_period`: 60 / 120 / 180 秒
 - `area_center`: 任意。指定する場合、`lat` は -90 から 90、`lng` は -180 から 180
 
 現在の実装では、設定更新時に `time_limit`, `oni_count`, `area_size`, `sync_interval`, `grace_period` をすべて送る前提です。一部項目だけを送ると、未指定の数値項目が `0` として扱われるため、フロント側ではフォームの全項目をまとめて送信してください。
+`max_players` は任意項目です。未指定の場合は既存値、既存値が未設定の古いルームでは 6 人として扱われます。
 `area_center` は任意項目です。未指定または `null` の場合、保存済みの中心地点は変更されません。
 
 ### Step3 時点の人数・設定 validation
@@ -106,6 +111,7 @@ Content-Type: application/json
 | 項目 | 現行ルール |
 | --- | --- |
 | 最大参加人数 | 15 人 |
+| `max_players` | 2 から 15。join 上限と待機画面枠数に使う |
 | 最小開始人数 | 2 人 |
 | 鬼人数 | 1 から 3 人 |
 | `oni_count` | 1 から 3 |
@@ -121,8 +127,8 @@ Content-Type: application/json
 | action | `join` | frontend -> backend | 実装済み | 入室、再接続、待機中の名前・色更新 |
 | event | `waiting` | backend -> clients | 実装済み | 待機中参加者一覧 |
 | action | `update_color` | frontend -> backend | 実装済み | 待機中/ゲーム中の自分の色更新 |
-| action | `start_roulette` | frontend -> backend | 実装済み | host がルーレット表示開始を通知 |
-| event | `roulette_started` | backend -> clients | 実装済み | guest 側のルーレット画面遷移 |
+| action | `start_roulette` | frontend -> backend | 実装済み | host がルーレット開始を通知 |
+| event | `roulette_started` | backend -> clients | 実装済み | roulette 表示順と確定鬼を同期 |
 | action | `start` | frontend -> backend | 実装済み | 役割指定とゲーム開始 |
 | event | `start` | backend -> clients | 実装済み | 各 viewer への役割通知 |
 | event | `game_active` | backend -> clients | 実装済み | 本編開始通知 |
@@ -156,9 +162,10 @@ Content-Type: application/json
 - 同じ `room_id` と `user_id` で再接続すると、DB に保存された状態を使って復帰します。
 - 新規参加は待機中のみ許可されます。ゲーム中またはリザルト中の新規参加は `error` になります。
 - ゲーム中またはリザルト中でも、既存の `room_id + user_id` の復帰は許可されます。
-- 参加人数は最大 15 人です。
+- 参加人数は `room_settings.max_players` までです。未設定の古いルームは 6 人扱い、絶対上限は 15 人です。
 - `name` は前後空白を除いて 1 文字以上 12 文字以下です。日本語も 1 文字として数えます。
 - `color` は `#RRGGBB` 形式です。`#000000` は鬼用のため、逃走者/待機中プレイヤーは使えません。
+- `join` の `color` が空、`#000000`、または他プレイヤーと重複する場合、backend が未使用 palette から安全な色を自動割当します。不正な形式の色は `error` です。
 
 受信イベント:
 
@@ -166,6 +173,7 @@ Content-Type: application/json
 {
   "event": "waiting",
   "host_user_id": "user-1",
+  "max_players": 6,
   "players": [
     {
       "user_id": "user-1",
@@ -214,12 +222,13 @@ Content-Type: application/json
 要点:
 
 - `oni_users` は鬼にする参加済み `user_id` の配列です。
+- 直前に `start_roulette` が成功している場合、backend は `roulette_started.selected_oni_user_ids` を優先して実際の鬼にします。この場合、`start` で送った `oni_users` とroulette結果はズレません。
 - 開始には 2 人以上の参加者が必要です。
 - `oni_users` は 1 から 3 人で、重複はできません。
 - 全員を鬼にすることはできません。
 - `oni_count` と `oni_users` の人数は一致させてください。
 - `oni_users` が空、未指定、重複、未参加の `user_id` を含む場合は開始されず、送信元に `error` が届きます。
-- 鬼に指定されたプレイヤーの `color` はサーバー側で `black` に上書きされます。
+- 鬼に指定された接続中プレイヤーの表示色はゲーム中メモリでは `black` になります。DB 上の `player.color` は再戦用に元の選択色を保持します。
 - `start` はhostのみ実行できます。
 
 受信イベント:
@@ -247,7 +256,7 @@ Content-Type: application/json
 
 ### start_roulette
 
-host がルーレット画面へ遷移したことを room 全体へ通知します。役割決定やゲーム開始は行いません。
+host がルーレット開始ボタンを押したときに送ります。この時点で backend が鬼を確定し、次の `start` では同じ `user_id` を実際の role に使います。ゲーム開始自体はまだ行いません。
 
 ```json
 {
@@ -259,9 +268,20 @@ host がルーレット画面へ遷移したことを room 全体へ通知しま
 
 ```json
 {
-  "event": "roulette_started"
+  "event": "roulette_started",
+  "roulette_order": ["user-001", "user-002"],
+  "selected_oni_user_ids": ["user-002"],
+  "starts_at": "2026-01-01T00:00:00Z",
+  "duration_ms": 3000
 }
 ```
+
+要点:
+
+- `selected_oni_user_ids` は必須です。frontend はhost/guest共通の最終停止位置として使ってください。
+- `roulette_order` は待機中プレイヤーの `user_id` を安定順で並べたものです。
+- `starts_at` と `duration_ms` はhost/guestのanimation同期用です。
+- 二重に `start_roulette` が送られた場合、参加者や設定が変わらない限りpending中の同じ結果を再送します。
 
 ### move
 
@@ -353,7 +373,8 @@ Step3 時点の実装では `request_id` はまだありません。Step4 以降
 
 - `result` 後だけ実行できます。ゲーム中や待機中に送ると `error` になります。
 - 接続中の参加者だけを次ゲームの参加者として残します。
-- 役割、捕獲状態、位置情報はリセットされ、全員が待機中の逃走者状態に戻ります。
+- 役割、捕獲状態、位置情報、game中の写真URLはリセットされ、全員が待機中の逃走者状態に戻ります。
+- `player.color` と `name` は維持されるため、再戦後の `waiting.players[].color` は空になりません。
 - 成功すると接続中クライアントへ `waiting` が届きます。
 - result 後の再戦用です。
 
@@ -385,6 +406,7 @@ Step3 時点の実装では `request_id` はまだありません。Step4 以降
   "event": "room_settings",
   "time_limit": 900,
   "oni_count": 1,
+  "max_players": 6,
   "area_size": "500m",
   "sync_interval": 180,
   "grace_period": 120,
