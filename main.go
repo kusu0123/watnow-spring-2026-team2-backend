@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"log"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
@@ -60,6 +61,7 @@ type areaCenterInput struct {
 }
 
 type roomSettingsInput struct {
+	UserID         *string          `json:"user_id"`
 	TimeLimit      int              `json:"time_limit"`
 	OniCount       int              `json:"oni_count"`
 	MaxPlayers     *int             `json:"max_players"`
@@ -100,15 +102,28 @@ func setupRouter(db *gorm.DB) *gin.Engine {
 	})
 
 	r.POST("/rooms", func(c *gin.Context) {
-		room := models.Room{
-			ID:         models.GenerateRoomID(), // models/room.goで作った関数
-			Status:     0,
-			TimeLimit:  900,
-			MaxPlayers: defaultMaxPlayers,
+		var room models.Room
+		var err error
+		maxRetries := 5
+
+		for i := 0; i < maxRetries; i++ {
+			room = models.Room{
+				ID:         models.GenerateRoomID(),
+				Status:     0,
+				TimeLimit:  900,
+				MaxPlayers: defaultMaxPlayers,
+			}
+			err = db.Create(&room).Error
+			if err == nil {
+				break
+			}
+			if !strings.Contains(err.Error(), "UNIQUE") {
+				break
+			}
 		}
 
-		if err := db.Create(&room).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "ルームの作成に失敗しました: " + err.Error()})
 			return
 		}
 
@@ -134,6 +149,16 @@ func setupRouter(db *gorm.DB) *gin.Engine {
 			}
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "ルーム取得に失敗しました"})
 			return
+		}
+
+		// ホスト認証（後方互換性のため、user_idが送られてきた場合のみチェック）
+		if input.UserID != nil && *input.UserID != "" {
+			if room.HostUserID != "" && room.HostUserID != *input.UserID {
+				c.JSON(http.StatusForbidden, gin.H{"error": "ホストのみ設定を変更できます"})
+				return
+			}
+		} else {
+			log.Printf("[Warning] Room: %s | settings update request did not provide user_id. Proceeding without host verification for backward compatibility.", roomID)
 		}
 
 		// 2. その後で、受け取ったデータの中身をチェックする

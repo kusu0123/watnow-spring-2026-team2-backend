@@ -134,12 +134,32 @@ func normalizePlayerName(name string) (string, bool) {
 	return trimmed, length >= 1 && length <= 12
 }
 
+func isValidPhotoURL(urlStr string) bool {
+	if urlStr == "" {
+		return false
+	}
+	supabaseURL := os.Getenv("SUPABASE_URL")
+	if supabaseURL != "" {
+		prefix := supabaseURL + "/storage/v1/object/public/"
+		if strings.HasPrefix(urlStr, prefix) {
+			return true
+		}
+	}
+	if strings.HasPrefix(urlStr, "https://example.com/") {
+		return true
+	}
+	return false
+}
+
 func (h *Hub) UpdateRoomSettings(roomID string, timeLimit, oniCount int, areaSize string, syncInterval, gracePeriod int) {
 	timeLimit, syncInterval, gracePeriod = cleanGameSettings(timeLimit, syncInterval, gracePeriod)
 
 	room := h.GetOrCreateRoom(roomID)
 	room.mu.Lock()
 	defer room.mu.Unlock()
+	if room.OniCount != oniCount {
+		clearPendingRouletteLocked(room)
+	}
 	room.TimeLimit = timeLimit
 	room.OniCount = oniCount
 	if room.MaxPlayers == 0 {
@@ -148,7 +168,6 @@ func (h *Hub) UpdateRoomSettings(roomID string, timeLimit, oniCount int, areaSiz
 	room.AreaSize = areaSize
 	room.SyncInterval = syncInterval
 	room.GracePeriod = gracePeriod
-	clearPendingRouletteLocked(room)
 }
 
 func (h *Hub) UpdateRoomSettingsFromModel(room models.Room) *RoomState {
@@ -157,6 +176,9 @@ func (h *Hub) UpdateRoomSettingsFromModel(room models.Room) *RoomState {
 	roomState := h.GetOrCreateRoom(room.ID)
 	roomState.mu.Lock()
 	defer roomState.mu.Unlock()
+	if roomState.OniCount != room.OniCount {
+		clearPendingRouletteLocked(roomState)
+	}
 	roomState.Status = room.Status
 	roomState.TimeLimit = timeLimit
 	roomState.OniCount = room.OniCount
@@ -169,7 +191,6 @@ func (h *Hub) UpdateRoomSettingsFromModel(room models.Room) *RoomState {
 	roomState.AreaCenterLng = room.AreaCenterLng
 	roomState.HasAreaCenter = room.HasAreaCenter
 	roomState.HostUserID = room.HostUserID
-	clearPendingRouletteLocked(roomState)
 	return roomState
 }
 
@@ -188,6 +209,12 @@ func (h *Hub) GetOrCreateRoom(roomID string) *RoomState {
 		h.Rooms[roomID] = room
 	}
 	return room
+}
+
+func (h *Hub) GetRoom(roomID string) *RoomState {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.Rooms[roomID]
 }
 
 func (h *Hub) Register(roomID string, client *Client) {
@@ -634,7 +661,7 @@ func (h *Hub) Unregister(roomID string, client *Client, db *gorm.DB) {
 	userID := client.UserID
 	client.mu.Unlock()
 
-	if !leftExplicitly && status == 0 && userID != "" && db != nil {
+	if !leftExplicitly && (status == 0 || status == 2) && userID != "" && db != nil {
 		if err := db.Where("room_id = ? AND user_id = ?", roomID, userID).Delete(&models.Player{}).Error; err != nil {
 			log.Printf("[Error] Room: %s | User: %s | waiting切断後のプレイヤー削除に失敗しました: %v\n", roomID, userID, err)
 		} else {
@@ -679,6 +706,9 @@ func (h *Hub) Unregister(roomID string, client *Client, db *gorm.DB) {
 						log.Printf("[Error] Room: %s | 空部屋の終了状態保存に失敗しました: %v\n", roomID, err)
 						h.mu.Unlock()
 						return
+					}
+					if err := db.Model(&models.CaptureRequest{}).Where("room_id = ? AND status = ?", roomID, "pending").Update("status", "canceled").Error; err != nil {
+						log.Printf("[Error] Room: %s | 空部屋の未解決キャプチャキャンセルに失敗しました: %v\n", roomID, err)
 					}
 				}
 				delete(h.Rooms, roomID)
@@ -1392,6 +1422,10 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				sendError(client, "先に入室してください")
 				continue
 			}
+			if !room.isHost(userID) {
+				sendError(client, "ホストのみ実行できます")
+				continue
+			}
 			if roomStatus(room) != 2 {
 				sendError(client, "リセットはリザルト後に実行してください")
 				continue
@@ -1525,6 +1559,10 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				sendError(client, "証拠写真のURLがありません") // 仕様書通り必須化
 				continue
 			}
+			if !isValidPhotoURL(msg.PhotoURL) {
+				sendError(client, "無効な写真URLです")
+				continue
+			}
 
 			room := GameHub.GetOrCreateRoom(roomID)
 			room.mu.RLock()
@@ -1571,7 +1609,10 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 
 			// 同一ターゲットへのPending確認
 			var existingPending int64
-			db.Model(&models.CaptureRequest{}).Where("room_id = ? AND target_user_id = ? AND status = ?", roomID, msg.TargetID, "pending").Count(&existingPending)
+			if err := db.Model(&models.CaptureRequest{}).Where("room_id = ? AND target_user_id = ? AND status = ?", roomID, msg.TargetID, "pending").Count(&existingPending).Error; err != nil {
+				sendError(client, "データベースエラーが発生しました")
+				continue
+			}
 			if existingPending > 0 {
 				sendError(client, "この逃走者には既に捕獲申請中です")
 				continue
@@ -1629,7 +1670,10 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 						AttackerID: aID,
 					}
 					// 対象の2人だけに送る
-					r := GameHub.GetOrCreateRoom(rID)
+					r := GameHub.GetRoom(rID)
+					if r == nil {
+						return
+					}
 					for _, c := range r.clientList() {
 						c.mu.Lock()
 						uid := c.UserID
