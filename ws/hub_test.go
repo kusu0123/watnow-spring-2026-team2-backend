@@ -1800,3 +1800,172 @@ func TestAllRunnersCaughtImmediatelyEndsGameWithResultAndAllowsReset(t *testing.
 	}
 	readUntilEvent(t, runnerConn, "waiting")
 }
+
+func TestUpdateRoomSettingsPreservesRoulettePending(t *testing.T) {
+	roomID := "testRoom_settings_roulette"
+	_, baseURL, cleanup := newTestServer(t, models.Room{
+		ID:        roomID,
+		Status:    0,
+		TimeLimit: 900,
+		OniCount:  1,
+	})
+	defer cleanup()
+
+	wsConn1 := connectToRoom(t, baseURL, roomID)
+	sendJSON(t, wsConn1, `{"action":"join","user_id":"player1","name":"Player 1","color":"#0000FF"}`)
+	_ = readUntilEvent(t, wsConn1, "waiting")
+
+	wsConn2 := connectToRoom(t, baseURL, roomID)
+	sendJSON(t, wsConn2, `{"action":"join","user_id":"player2","name":"Player 2","color":"#3B82F6"}`)
+	_ = readUntilEvent(t, wsConn2, "waiting")
+
+	// ルーレットを準備して開始、停止
+	ready := prepareRoulette(t, wsConn1, wsConn2)
+	started := startRouletteSpin(t, wsConn1, wsConn2, ready.RouletteSessionID)
+	_ = stopRouletteSpin(t, wsConn1, wsConn2, ready.RouletteSessionID, started.SpinID)
+
+	room := GameHub.GetOrCreateRoom(roomID)
+	room.mu.RLock()
+	pendingOni := room.Roulette.PendingOniUserIDs
+	oniCountBefore := room.OniCount
+	room.mu.RUnlock()
+
+	if len(pendingOni) == 0 {
+		t.Fatalf("ルーレット停止後のPendingOniが空です")
+	}
+
+	// 別の設定（時間制限など、OniCount以外）を更新
+	GameHub.UpdateRoomSettings(roomID, 1800, oniCountBefore, "300", 60, 60)
+
+	room.mu.RLock()
+	pendingOniAfter := room.Roulette.PendingOniUserIDs
+	room.mu.RUnlock()
+
+	if len(pendingOniAfter) == 0 {
+		t.Fatalf("OniCount以外の設定更新でPendingOniが消えてしまいました (P0バグ)")
+	}
+
+	// OniCountを変更して設定更新
+	GameHub.UpdateRoomSettings(roomID, 1800, oniCountBefore+1, "300", 60, 60)
+
+	room.mu.RLock()
+	pendingOniAfterChange := room.Roulette.PendingOniUserIDs
+	room.mu.RUnlock()
+
+	if len(pendingOniAfterChange) != 0 {
+		t.Fatalf("OniCount変更時にもPendingOniがクリアされていません")
+	}
+}
+
+func TestResetRestrictedToHost(t *testing.T) {
+	roomID := "testRoom_reset_host"
+	db, baseURL, cleanup := newTestServer(t, models.Room{
+		ID:        roomID,
+		Status:    0,
+		TimeLimit: 900,
+		OniCount:  1,
+	})
+	defer cleanup()
+
+	wsConn1 := connectToRoom(t, baseURL, roomID)
+	sendJSON(t, wsConn1, `{"action":"join","user_id":"player1","name":"Player 1","color":"#0000FF"}`)
+	_ = readUntilEvent(t, wsConn1, "waiting")
+
+	wsConn2 := connectToRoom(t, baseURL, roomID)
+	sendJSON(t, wsConn2, `{"action":"join","user_id":"guest","name":"Guest Player","color":"#3B82F6"}`)
+	_ = readUntilEvent(t, wsConn2, "waiting")
+
+	// ゲーム開始 (ダミーで開始)
+	ready := prepareRoulette(t, wsConn1, wsConn2)
+	started := startRouletteSpin(t, wsConn1, wsConn2, ready.RouletteSessionID)
+	_ = stopRouletteSpin(t, wsConn1, wsConn2, ready.RouletteSessionID, started.SpinID)
+
+	sendJSON(t, wsConn1, `{"action":"start","oni_users":["player1"]}`)
+	_ = readUntilEvent(t, wsConn1, "start")
+
+	// ゲームを終了状態 (Status=2) に強制移行する
+	room := GameHub.GetOrCreateRoom(roomID)
+	room.mu.Lock()
+	room.Status = 2
+	room.mu.Unlock()
+	db.Model(&models.Room{}).Where("id = ?", roomID).Update("status", 2)
+
+	// ゲスト (wsConn2) から reset を送信
+	sendJSON(t, wsConn2, `{"action":"reset"}`)
+	err2 := readUntilEvent(t, wsConn2, "error")
+	if !strings.Contains(err2.Message, "ホストのみ実行できます") {
+		t.Fatalf("ゲストからのリセットが拒否されませんでした: %s", err2.Message)
+	}
+
+	// ホスト (wsConn1) から reset を送信
+	sendJSON(t, wsConn1, `{"action":"reset"}`)
+	resetWaiting := readUntilEvent(t, wsConn1, "waiting")
+	if len(resetWaiting.Players) != 2 {
+		t.Fatalf("ホストからのリセットが失敗しました: %+v", resetWaiting)
+	}
+}
+
+func TestCaptureRequestValidatesPhotoURL(t *testing.T) {
+	roomID := "testRoom_capture_url"
+	_, baseURL, cleanup := newTestServer(t, models.Room{
+		ID:        roomID,
+		Status:    0,
+		TimeLimit: 900,
+		OniCount:  1,
+	})
+	defer cleanup()
+
+	wsConn1 := connectToRoom(t, baseURL, roomID)
+	sendJSON(t, wsConn1, `{"action":"join","user_id":"player1","name":"Player 1","color":"#0000FF"}`)
+	_ = readUntilEvent(t, wsConn1, "waiting")
+
+	wsConn2 := connectToRoom(t, baseURL, roomID)
+	sendJSON(t, wsConn2, `{"action":"join","user_id":"player2","name":"Player 2","color":"#3B82F6"}`)
+	_ = readUntilEvent(t, wsConn2, "waiting")
+
+	// ゲーム開始
+	ready := prepareRoulette(t, wsConn1, wsConn2)
+	started := startRouletteSpin(t, wsConn1, wsConn2, ready.RouletteSessionID)
+	stopped := stopRouletteSpin(t, wsConn1, wsConn2, ready.RouletteSessionID, started.SpinID)
+
+	oniUserID := stopped.SelectedOniUserIDs[0]
+	var oniConn, runnerConn *websocket.Conn
+	var runnerID string
+	if oniUserID == "player1" {
+		oniConn = wsConn1
+		runnerConn = wsConn2
+		runnerID = "player2"
+	} else {
+		oniConn = wsConn2
+		runnerConn = wsConn1
+		runnerID = "player1"
+	}
+
+	sendJSON(t, wsConn1, `{"action":"start","oni_users":[]}`)
+	_ = readUntilEvent(t, wsConn1, "start")
+
+	// ゲームをアクティブに
+	room := GameHub.GetOrCreateRoom(roomID)
+	room.mu.Lock()
+	room.IsGameActive = true
+	room.mu.Unlock()
+
+	// 無効なURLを送信
+	sendJSON(t, oniConn, fmt.Sprintf(`{"action":"capture_request","target_id":%q,"photo_url":"http://malicious.com/hack.jpg"}`, runnerID))
+	err1 := readUntilEvent(t, oniConn, "error")
+	if !strings.Contains(err1.Message, "無効な写真URLです") {
+		t.Fatalf("無効なURLでのキャプチャがエラーになりませんでした: %s", err1.Message)
+	}
+
+	// 空のURLを送信
+	sendJSON(t, oniConn, fmt.Sprintf(`{"action":"capture_request","target_id":%q,"photo_url":""}`, runnerID))
+	err2 := readUntilEvent(t, oniConn, "error")
+	if !strings.Contains(err2.Message, "証拠写真のURLがありません") {
+		t.Fatalf("空のURLでのキャプチャがエラーになりませんでした: %s", err2.Message)
+	}
+
+	// 有効なURLを送信
+	sendJSON(t, oniConn, fmt.Sprintf(`{"action":"capture_request","target_id":%q,"photo_url":"https://example.com/test.jpg"}`, runnerID))
+	// エラーではなく、ターゲットへ capture_checking が飛ぶはず
+	_ = readUntilEvent(t, runnerConn, "capture_checking")
+}

@@ -441,6 +441,10 @@ func (room *RoomState) finish(roomID string, db *gorm.DB) bool {
 	if err := db.Model(&models.Room{}).Where("id = ?", roomID).Update("status", 2).Error; err != nil {
 		log.Printf("[Error] Room: %s | 終了状態の保存に失敗しました: %v\n", roomID, err)
 	}
+	// 未解決のキャプチャリクエストもキャンセル
+	if err := db.Model(&models.CaptureRequest{}).Where("room_id = ? AND status = ?", roomID, "pending").Update("status", "canceled").Error; err != nil {
+		log.Printf("[Error] Room: %s | 未解決キャプチャキャンセルに失敗しました: %v\n", roomID, err)
+	}
 	room.Broadcast(resultMessage)
 	return true
 }
