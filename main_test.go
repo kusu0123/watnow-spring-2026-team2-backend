@@ -32,7 +32,7 @@ func newHTTPTestServer(t *testing.T, room models.Room) (*gorm.DB, *httptest.Serv
 		t.Fatalf("DB取得失敗: %v", err)
 	}
 	sqlDB.SetMaxOpenConns(1)
-	if err := db.AutoMigrate(&models.Room{}, &models.Player{}); err != nil {
+	if err := db.AutoMigrate(&models.Room{}, &models.Player{}, &models.CaptureRequest{}); err != nil {
 		t.Fatalf("マイグレーション失敗: %v", err)
 	}
 	if room.ID != "" {
