@@ -4,8 +4,10 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"log"
 
 	"github.com/gin-gonic/gin"
+	"github.com/joho/godotenv"
 	"github.com/watnow/watnow-spring-2026-team2-backend/models"
 	"github.com/watnow/watnow-spring-2026-team2-backend/ws"
 	"gorm.io/driver/sqlite"
@@ -13,6 +15,11 @@ import (
 )
 
 func main() {
+	err := godotenv.Load()
+	if err != nil {
+		log.Println("Warning: Error loading .env file (It's OK if running in production where env vars are set)")
+	}
+
 	db, err := gorm.Open(sqlite.Open("onigokko.db"), &gorm.Config{})
 	if err != nil {
 		panic("DB接続失敗")

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"os"
 	"math/rand"
 	"net/http"
 	"sort"
@@ -1424,6 +1425,14 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				c.CapturedAt = nil
 				c.mu.Unlock()
 			}
+			var requests []models.CaptureRequest
+    		if err := db.Where("room_id = ?", roomID).Find(&requests).Error; err == nil {
+        		for _, req := range requests {
+            		go deleteSupabasePhoto(req.PhotoURL)
+        		}
+        		// 用済みの申請履歴レコードをDBからも削除する
+        		db.Where("room_id = ?", roomID).Delete(&models.CaptureRequest{})
+   			 }
 
 			room.Broadcast(room.waitingMessage())
 
@@ -1603,7 +1612,7 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 			targetClient.mu.Unlock()
 
 			// 30秒ExpireのGoroutine起動
-			go func(reqID, rID, tID, aID string) {
+			go func(reqID, rID, tID, aID, pURL string) {
 				time.Sleep(30 * time.Second)
 
 				// 排他制御：30秒後にまだpendingならexpiredに更新する
@@ -1629,8 +1638,9 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 							_ = sendToClient(c, expMsg)
 						}
 					}
+					go deleteSupabasePhoto(pURL)
 				}
-			}(requestID, roomID, msg.TargetID, attackerID)
+			}(requestID, roomID, msg.TargetID, attackerID, msg.PhotoURL)
 
 		// --- 3歩目：逃走者からの回答 ---
 		case "capture_response":
@@ -1760,10 +1770,57 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 						_ = sendToClient(c, deniedMsg)
 					}
 				}
+				go deleteSupabasePhoto(req.PhotoURL)
 			}
 
 		default:
 			sendError(client, "対応していない操作です")
 		}
+	}
+}
+
+func deleteSupabasePhoto(photoURL string) {
+	if photoURL == "" {
+		return
+	}
+
+	// 環境変数からURLとキーを取得
+	supabaseURL := os.Getenv("SUPABASE_URL")
+	supabaseKey := os.Getenv("SUPABASE_KEY")
+
+	if supabaseURL == "" || supabaseKey == "" {
+		log.Println("[Storage] エラー: SUPABASE_URL または SUPABASE_KEY が環境変数に設定されていません")
+		return
+	}
+
+	// URLからバケット名とファイル名を抽出する
+	prefix := supabaseURL + "/storage/v1/object/public/"
+	if !strings.HasPrefix(photoURL, prefix) {
+		return
+	}
+	objectPath := strings.TrimPrefix(photoURL, prefix)
+
+	// DELETE用のAPIエンドポイント
+	deleteAPI := supabaseURL + "/storage/v1/object/" + objectPath
+
+	req, err := http.NewRequest("DELETE", deleteAPI, nil)
+	if err != nil {
+		log.Printf("[Storage] 削除リクエスト作成エラー: %v\n", err)
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+supabaseKey)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("[Storage] 画像削除エラー: %v\n", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		log.Printf("[Storage] 画像を削除しました: %s\n", objectPath)
+	} else {
+		log.Printf("[Storage] 画像削除失敗: ステータスコード %d\n", resp.StatusCode)
 	}
 }
