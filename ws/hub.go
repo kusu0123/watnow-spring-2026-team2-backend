@@ -167,7 +167,7 @@ func (h *Hub) UpdateRoomSettings(roomID string, timeLimit, oniCount int, areaSiz
 	room := h.GetOrCreateRoom(roomID)
 	room.mu.Lock()
 	defer room.mu.Unlock()
-	if room.OniCount != oniCount {
+	if room.OniCount != 0 && room.OniCount != oniCount {
 		clearPendingRouletteLocked(room)
 	}
 	room.TimeLimit = timeLimit
@@ -186,7 +186,7 @@ func (h *Hub) UpdateRoomSettingsFromModel(room models.Room) *RoomState {
 	roomState := h.GetOrCreateRoom(room.ID)
 	roomState.mu.Lock()
 	defer roomState.mu.Unlock()
-	if roomState.OniCount != room.OniCount {
+	if roomState.OniCount != 0 && roomState.OniCount != room.OniCount {
 		clearPendingRouletteLocked(roomState)
 	}
 	roomState.Status = room.Status
@@ -290,6 +290,19 @@ func isReservedPlayerColor(color string) bool {
 	return strings.EqualFold(color, "#000000") || strings.EqualFold(color, "black")
 }
 
+func isAllowedPlayerColor(color string) bool {
+	normalized, ok := normalizeHexColor(color)
+	if !ok {
+		return false
+	}
+	for _, pColor := range playerColorPalette {
+		if strings.EqualFold(normalized, pColor) {
+			return true
+		}
+	}
+	return false
+}
+
 var (
 	errNoAvailablePlayerColor = errors.New("利用可能なカラーがありません")
 	playerColorPalette        = []string{
@@ -371,7 +384,7 @@ func firstAvailablePlayerColor(db *gorm.DB, roomID, userID string) (string, erro
 }
 
 func safeJoinColor(db *gorm.DB, roomID, userID, requestedColor string) (string, error) {
-	if requestedColor == "" || isReservedPlayerColor(requestedColor) {
+	if requestedColor == "" || isReservedPlayerColor(requestedColor) || !isAllowedPlayerColor(requestedColor) {
 		return firstAvailablePlayerColor(db, roomID, userID)
 	}
 	normalizedColor, ok := normalizeHexColor(requestedColor)
@@ -723,7 +736,11 @@ func (h *Hub) Unregister(roomID string, client *Client, db *gorm.DB) {
 			clearPendingRouletteLocked(room)
 			room.mu.Unlock()
 			if !isEmpty {
-				room.Broadcast(room.waitingMessage())
+				if status == 0 {
+					room.Broadcast(room.waitingMessage())
+				} else if status == 2 {
+					room.Broadcast(room.resultMessageBestEffort(roomID, db))
+				}
 			}
 		}
 	}
@@ -1060,6 +1077,14 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 
 			if player.Role == 1 {
 				sendError(client, "鬼のカラーは変更できません")
+				continue
+			}
+			if isReservedPlayerColor(normalizedColor) {
+				sendError(client, "黒は鬼用のカラーです")
+				continue
+			}
+			if !isAllowedPlayerColor(normalizedColor) {
+				sendError(client, "許可されていないカラーです")
 				continue
 			}
 			if !strings.EqualFold(player.Color, normalizedColor) {
