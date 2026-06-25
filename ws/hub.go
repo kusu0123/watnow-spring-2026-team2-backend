@@ -4,9 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
-	"os"
 	"math/rand"
 	"net/http"
+	"net/url"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -135,27 +136,29 @@ func normalizePlayerName(name string) (string, bool) {
 }
 
 func isValidPhotoURL(urlStr string) bool {
+	urlStr = strings.TrimSpace(urlStr)
 	if urlStr == "" {
 		return false
 	}
-	if !strings.HasPrefix(urlStr, "https://") {
+
+	supabaseURL := strings.TrimRight(strings.TrimSpace(os.Getenv("SUPABASE_URL")), "/")
+	if supabaseURL == "" {
 		return false
 	}
-	if strings.Contains(urlStr, "localhost") || strings.Contains(urlStr, "127.0.0.1") {
+
+	baseURL, err := url.Parse(supabaseURL)
+	if err != nil || baseURL.Scheme != "https" || baseURL.Host == "" {
 		return false
 	}
-	supabaseURL := os.Getenv("SUPABASE_URL")
-	if supabaseURL != "" {
-		prefix := supabaseURL + "/storage/v1/object/public/"
-		if strings.HasPrefix(urlStr, prefix) {
-			return true
-		}
-		if strings.HasPrefix(urlStr, "https://example.com/") {
-			return true
-		}
+
+	photoURL, err := url.Parse(urlStr)
+	if err != nil || photoURL.Scheme != "https" || photoURL.Host != baseURL.Host {
 		return false
 	}
-	return true
+
+	basePath := strings.TrimRight(baseURL.EscapedPath(), "/")
+	publicPrefix := basePath + "/storage/v1/object/public/"
+	return strings.HasPrefix(photoURL.EscapedPath(), publicPrefix)
 }
 
 func (h *Hub) UpdateRoomSettings(roomID string, timeLimit, oniCount int, areaSize string, syncInterval, gracePeriod int) {
@@ -322,6 +325,19 @@ var (
 	}
 )
 
+func isPlayerPaletteColor(color string) bool {
+	normalizedColor, ok := normalizeHexColor(color)
+	if !ok {
+		return false
+	}
+	for _, paletteColor := range playerColorPalette {
+		if normalizedColor == paletteColor {
+			return true
+		}
+	}
+	return false
+}
+
 func colorUsedByOtherPlayer(db *gorm.DB, roomID, userID, color string) (bool, error) {
 	var players []models.Player
 	if err := db.Where("room_id = ?", roomID).Find(&players).Error; err != nil {
@@ -371,8 +387,11 @@ func safeJoinColor(db *gorm.DB, roomID, userID, requestedColor string) (string, 
 	if requestedColor == "" || isReservedPlayerColor(requestedColor) || !isAllowedPlayerColor(requestedColor) {
 		return firstAvailablePlayerColor(db, roomID, userID)
 	}
+	normalizedColor, ok := normalizeHexColor(requestedColor)
+	if !ok || !isPlayerPaletteColor(normalizedColor) {
+		return firstAvailablePlayerColor(db, roomID, userID)
+	}
 
-	normalizedColor, _ := normalizeHexColor(requestedColor)
 	used, err := colorUsedByOtherPlayer(db, roomID, userID, normalizedColor)
 	if err != nil {
 		return "", err
@@ -871,12 +890,17 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 			msg.Name = normalizedName
 
 			if msg.Color != "" {
-				if strings.EqualFold(strings.TrimSpace(msg.Color), "black") {
+				msg.Color = strings.TrimSpace(msg.Color)
+				if strings.EqualFold(msg.Color, "black") {
 					msg.Color = "#000000"
 				} else {
 					normalizedColor, ok := normalizeHexColor(msg.Color)
 					if !ok {
 						sendError(client, "カラーの形式が不正です（例: #FF0000）")
+						continue
+					}
+					if !isReservedPlayerColor(normalizedColor) && !isPlayerPaletteColor(normalizedColor) {
+						sendError(client, "カラーは指定されたパレットから選択してください")
 						continue
 					}
 					msg.Color = normalizedColor
@@ -1016,9 +1040,18 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				sendError(client, "カラーを選択してください")
 				continue
 			}
+			msg.Color = strings.TrimSpace(msg.Color)
+			if isReservedPlayerColor(msg.Color) {
+				sendError(client, "黒は鬼用のカラーです")
+				continue
+			}
 			normalizedColor, ok := normalizeHexColor(msg.Color)
 			if !ok {
 				sendError(client, "カラーの形式が不正です（例: #FF0000）")
+				continue
+			}
+			if !isPlayerPaletteColor(normalizedColor) {
+				sendError(client, "カラーは指定されたパレットから選択してください")
 				continue
 			}
 
@@ -1502,13 +1535,13 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				c.mu.Unlock()
 			}
 			var requests []models.CaptureRequest
-    		if err := db.Where("room_id = ?", roomID).Find(&requests).Error; err == nil {
-        		for _, req := range requests {
-            		go deleteSupabasePhoto(req.PhotoURL)
-        		}
-        		// 用済みの申請履歴レコードをDBからも削除する
-        		db.Where("room_id = ?", roomID).Delete(&models.CaptureRequest{})
-   			 }
+			if err := db.Where("room_id = ?", roomID).Find(&requests).Error; err == nil {
+				for _, req := range requests {
+					go deleteSupabasePhoto(req.PhotoURL)
+				}
+				// 用済みの申請履歴レコードをDBからも削除する
+				db.Where("room_id = ?", roomID).Delete(&models.CaptureRequest{})
+			}
 
 			room.Broadcast(room.waitingMessage())
 
