@@ -367,18 +367,18 @@ func TestWebSocketFlow(t *testing.T) {
 
 	wsConn := connectToRoom(t, baseURL, roomID)
 
-	sendJSON(t, wsConn, `{"action":"join","user_id":"player1","name":"はるき","color":"#0000FF"}`)
+	sendJSON(t, wsConn, `{"action":"join","user_id":"player1","name":"はるき","color":"#E2F0CB"}`)
 	msg := readMessage(t, wsConn)
 	if msg.Event != "waiting" {
 		t.Fatalf("想定外のイベント: %s", msg.Event)
 	}
-	assertWaitingPlayer(t, msg, "player1", "はるき", "#0000FF")
+	assertWaitingPlayer(t, msg, "player1", "はるき", "#E2F0CB")
 
 	var player models.Player
 	if err := db.Where("room_id = ? AND user_id = ?", roomID, "player1").First(&player).Error; err != nil {
 		t.Fatalf("プレイヤー保存失敗: %v", err)
 	}
-	if player.ID != makePlayerID(roomID, "player1") || player.Name != "はるき" || player.Color != "#0000FF" {
+	if player.ID != makePlayerID(roomID, "player1") || player.Name != "はるき" || player.Color != "#E2F0CB" {
 		t.Fatalf("保存されたプレイヤーが不正です: %+v", player)
 	}
 
@@ -391,7 +391,7 @@ func TestWebSocketFlow(t *testing.T) {
 	client.mu.Lock()
 	color := client.Color
 	client.mu.Unlock()
-	if color != "#0000FF" {
+	if color != "#E2F0CB" {
 		t.Fatalf("メモリに保存されたカラーが不正です: %s", color)
 	}
 
@@ -423,27 +423,27 @@ func TestUpdateColorBroadcastsAndPersistsWaiting(t *testing.T) {
 	wsConn2 := connectToRoom(t, baseURL, roomID)
 	defer wsConn2.Close()
 
-	sendJSON(t, wsConn1, `{"action":"join","user_id":"player1","name":"はるき","color":"#0000FF"}`)
+	sendJSON(t, wsConn1, `{"action":"join","user_id":"player1","name":"はるき","color":"#E2F0CB"}`)
 	if msg := readMessage(t, wsConn1); msg.Event != "waiting" {
 		t.Fatalf("想定外のイベント: %s", msg.Event)
 	}
-	sendJSON(t, wsConn2, `{"action":"join","user_id":"player2","name":"みな","color":"#FF00AA"}`)
+	sendJSON(t, wsConn2, `{"action":"join","user_id":"player2","name":"みな","color":"#B5EAD7"}`)
 	readUntilEvent(t, wsConn1, "waiting")
 	if msg := readMessage(t, wsConn2); msg.Event != "waiting" {
 		t.Fatalf("想定外のイベント: %s", msg.Event)
 	}
 
-	sendJSON(t, wsConn1, `{"action":"update_color","color":"#00cc66"}`)
+	sendJSON(t, wsConn1, `{"action":"update_color","color":"#99A98F"}`)
 	waiting1 := readUntilEvent(t, wsConn1, "waiting")
 	waiting2 := readUntilEvent(t, wsConn2, "waiting")
-	assertWaitingPlayer(t, waiting1, "player1", "はるき", "#00CC66")
-	assertWaitingPlayer(t, waiting2, "player1", "はるき", "#00CC66")
+	assertWaitingPlayer(t, waiting1, "player1", "はるき", "#99A98F")
+	assertWaitingPlayer(t, waiting2, "player1", "はるき", "#99A98F")
 
 	var player models.Player
 	if err := db.Where("room_id = ? AND user_id = ?", roomID, "player1").First(&player).Error; err != nil {
 		t.Fatalf("プレイヤー取得失敗: %v", err)
 	}
-	if player.Color != "#00CC66" {
+	if player.Color != "#99A98F" {
 		t.Fatalf("DBのcolorが更新されていません: %+v", player)
 	}
 }
@@ -461,7 +461,7 @@ func TestUpdateColorRejectsInvalidColor(t *testing.T) {
 	wsConn := connectToRoom(t, baseURL, roomID)
 	defer wsConn.Close()
 
-	sendJSON(t, wsConn, `{"action":"join","user_id":"player1","name":"はるき","color":"#0000FF"}`)
+	sendJSON(t, wsConn, `{"action":"join","user_id":"player1","name":"はるき","color":"#E2F0CB"}`)
 	if msg := readMessage(t, wsConn); msg.Event != "waiting" {
 		t.Fatalf("想定外のイベント: %s", msg.Event)
 	}
@@ -487,11 +487,11 @@ func TestUpdateColorRejectsDuplicateAndReservedBlack(t *testing.T) {
 	wsConn2 := connectToRoom(t, baseURL, roomID)
 	defer wsConn2.Close()
 
-	sendJSON(t, wsConn1, `{"action":"join","user_id":"player1","name":"はるき","color":"#0000FF"}`)
+	sendJSON(t, wsConn1, `{"action":"join","user_id":"player1","name":"はるき","color":"#E2F0CB"}`)
 	if msg := readMessage(t, wsConn1); msg.Event != "waiting" {
 		t.Fatalf("想定外のイベント: %s", msg.Event)
 	}
-	sendJSON(t, wsConn2, `{"action":"join","user_id":"player2","name":"みな","color":"#FF00AA"}`)
+	sendJSON(t, wsConn2, `{"action":"join","user_id":"player2","name":"みな","color":"#B5EAD7"}`)
 	readUntilEvent(t, wsConn1, "waiting")
 	if msg := readMessage(t, wsConn2); msg.Event != "waiting" {
 		t.Fatalf("想定外のイベント: %s", msg.Event)
@@ -499,19 +499,19 @@ func TestUpdateColorRejectsDuplicateAndReservedBlack(t *testing.T) {
 
 	duplicateJoinConn := connectToRoom(t, baseURL, roomID)
 	defer duplicateJoinConn.Close()
-	sendJSON(t, duplicateJoinConn, `{"action":"join","user_id":"player3","name":"そうた","color":"#FF00AA"}`)
+	sendJSON(t, duplicateJoinConn, `{"action":"join","user_id":"player3","name":"そうた","color":"#B5EAD7"}`)
 	duplicateJoinWaiting := readUntilEvent(t, duplicateJoinConn, "waiting")
 	player3, ok := findWaitingPlayer(duplicateJoinWaiting.Players, "player3")
 	if !ok {
 		t.Fatalf("重複色join後のwaitingにplayer3が含まれていません: %+v", duplicateJoinWaiting.Players)
 	}
-	if player3.Color == "" || player3.Color == "#FF00AA" {
+	if player3.Color == "" || player3.Color == "#B5EAD7" {
 		t.Fatalf("重複色joinで安全な色が自動割当されていません: %+v", player3)
 	}
 	readUntilEvent(t, wsConn1, "waiting")
 	readUntilEvent(t, wsConn2, "waiting")
 
-	sendJSON(t, wsConn1, `{"action":"update_color","color":"#FF00AA"}`)
+	sendJSON(t, wsConn1, `{"action":"update_color","color":"#B5EAD7"}`)
 	assertErrorMessage(t, wsConn1, "このカラーはすでに使われています")
 	sendJSON(t, wsConn1, `{"action":"update_color","color":"#000000"}`)
 	assertErrorMessage(t, wsConn1, "黒は鬼用のカラーです")
@@ -534,11 +534,11 @@ func TestUpdateColorReflectsNextActiveSync(t *testing.T) {
 	runnerConn := connectToRoom(t, baseURL, roomID)
 	defer runnerConn.Close()
 
-	sendJSON(t, oniConn, `{"action":"join","user_id":"player1","name":"はるき","color":"#0000FF"}`)
+	sendJSON(t, oniConn, `{"action":"join","user_id":"player1","name":"はるき","color":"#E2F0CB"}`)
 	if msg := readMessage(t, oniConn); msg.Event != "waiting" {
 		t.Fatalf("想定外のイベント: %s", msg.Event)
 	}
-	sendJSON(t, runnerConn, `{"action":"join","user_id":"player2","name":"みな","color":"#FF00AA"}`)
+	sendJSON(t, runnerConn, `{"action":"join","user_id":"player2","name":"みな","color":"#B5EAD7"}`)
 	readUntilEvent(t, oniConn, "waiting")
 	if msg := readMessage(t, runnerConn); msg.Event != "waiting" {
 		t.Fatalf("想定外のイベント: %s", msg.Event)
@@ -552,7 +552,7 @@ func TestUpdateColorReflectsNextActiveSync(t *testing.T) {
 	readUntilEvent(t, runnerConn, "game_active")
 	readUntilEvent(t, runnerConn, "sync")
 
-	sendJSON(t, runnerConn, `{"action":"update_color","color":"#00CC66"}`)
+	sendJSON(t, runnerConn, `{"action":"update_color","color":"#99A98F"}`)
 	room := GameHub.GetOrCreateRoom(roomID)
 	waitFor(t, func() bool {
 		client, ok := findClient(room, "player2")
@@ -562,7 +562,7 @@ func TestUpdateColorReflectsNextActiveSync(t *testing.T) {
 		client.mu.Lock()
 		color := client.Color
 		client.mu.Unlock()
-		return color == "#00CC66"
+		return color == "#99A98F"
 	})
 	room.SendSyncToAll()
 
@@ -571,7 +571,7 @@ func TestUpdateColorReflectsNextActiveSync(t *testing.T) {
 	if !ok {
 		t.Fatalf("syncにplayer2が含まれていません: %+v", syncMsg.Locations)
 	}
-	assertLocationMeta(t, location, roomID, "player2", "みな", 0, false, "#00CC66")
+	assertLocationMeta(t, location, roomID, "player2", "みな", 0, false, "#99A98F")
 }
 
 func TestWaitingHostAssignedAndTransferredOnLeave(t *testing.T) {
@@ -972,7 +972,7 @@ func TestJoinSendsRoomSettingsToJoiningClient(t *testing.T) {
 	wsConn := connectToRoom(t, baseURL, roomID)
 	defer wsConn.Close()
 
-	sendJSON(t, wsConn, `{"action":"join","user_id":"player1","name":"はるき","color":"#0000FF"}`)
+	sendJSON(t, wsConn, `{"action":"join","user_id":"player1","name":"はるき","color":"#E2F0CB"}`)
 	if msg := readRawMessage(t, wsConn); msg.Event != "waiting" {
 		t.Fatalf("想定外のイベント: %s", msg.Event)
 	}
@@ -998,11 +998,11 @@ func TestWebSocketStartFlowWithSettings(t *testing.T) {
 	wsConn2 := connectToRoom(t, baseURL, roomID)
 	defer wsConn2.Close()
 
-	sendJSON(t, wsConn, `{"action":"join","user_id":"player1","name":"はるき","color":"#00AAFF"}`)
+	sendJSON(t, wsConn, `{"action":"join","user_id":"player1","name":"はるき","color":"#E2F0CB"}`)
 	if msg := readMessage(t, wsConn); msg.Event != "waiting" {
 		t.Fatalf("想定外のイベント: %s", msg.Event)
 	}
-	sendJSON(t, wsConn2, `{"action":"join","user_id":"player2","name":"みな","color":"#FF00AA"}`)
+	sendJSON(t, wsConn2, `{"action":"join","user_id":"player2","name":"みな","color":"#B5EAD7"}`)
 	if msg := readMessage(t, wsConn); msg.Event != "waiting" {
 		t.Fatalf("想定外のイベント: %s", msg.Event)
 	}
@@ -1056,14 +1056,14 @@ func TestWebSocketStartFlowWithSettings(t *testing.T) {
 	if err := db.Where("room_id = ? AND user_id = ?", roomID, "player1").First(&player).Error; err != nil {
 		t.Fatalf("プレイヤー取得失敗: %v", err)
 	}
-	if player.Role != 0 || player.Color != "#00AAFF" {
+	if player.Role != 0 || player.Color != "#E2F0CB" {
 		t.Fatalf("DBに保存されたプレイヤー状態が不正です: %+v", player)
 	}
 	var oni models.Player
 	if err := db.Where("room_id = ? AND user_id = ?", roomID, "player2").First(&oni).Error; err != nil {
 		t.Fatalf("鬼取得失敗: %v", err)
 	}
-	if oni.Role != 1 || oni.Color != "#FF00AA" {
+	if oni.Role != 1 || oni.Color != "#B5EAD7" {
 		t.Fatalf("DBに保存された鬼状態が不正です: %+v", oni)
 	}
 	client, ok := findClient(room, "player2")
@@ -1105,12 +1105,12 @@ func TestViewerSpecificSyncPayloadAndImmediateFirstSync(t *testing.T) {
 	otherRunnerConn := connectToRoom(t, baseURL, roomID)
 	defer otherRunnerConn.Close()
 
-	sendJSON(t, oniConn, `{"action":"join","user_id":"player1","name":"はるき","color":"#00AAFF"}`)
+	sendJSON(t, oniConn, `{"action":"join","user_id":"player1","name":"はるき","color":"#E2F0CB"}`)
 	if msg := readMessage(t, oniConn); msg.Event != "waiting" {
 		t.Fatalf("想定外のイベント: %s", msg.Event)
 	}
 
-	sendJSON(t, runnerConn, `{"action":"join","user_id":"player2","name":"みな","color":"#FF00AA"}`)
+	sendJSON(t, runnerConn, `{"action":"join","user_id":"player2","name":"みな","color":"#B5EAD7"}`)
 	if msg := readMessage(t, oniConn); msg.Event != "waiting" {
 		t.Fatalf("想定外のイベント: %s", msg.Event)
 	}
@@ -1118,7 +1118,7 @@ func TestViewerSpecificSyncPayloadAndImmediateFirstSync(t *testing.T) {
 		t.Fatalf("想定外のイベント: %s", msg.Event)
 	}
 
-	sendJSON(t, otherRunnerConn, `{"action":"join","user_id":"player3","name":"そうた","color":"#00CC66"}`)
+	sendJSON(t, otherRunnerConn, `{"action":"join","user_id":"player3","name":"そうた","color":"#99A98F"}`)
 	if msg := readMessage(t, oniConn); msg.Event != "waiting" {
 		t.Fatalf("想定外のイベント: %s", msg.Event)
 	}
@@ -1152,13 +1152,13 @@ func TestViewerSpecificSyncPayloadAndImmediateFirstSync(t *testing.T) {
 	if !ok {
 		t.Fatalf("鬼向けsyncに未捕獲逃走者player2が含まれていません: %+v", oniSync.Locations)
 	}
-	assertLocationMeta(t, runnerLocation, roomID, "player2", "みな", 0, false, "#FF00AA")
+	assertLocationMeta(t, runnerLocation, roomID, "player2", "みな", 0, false, "#B5EAD7")
 	assertLocationCoords(t, runnerLocation, 34.7, 135.5)
 	otherRunnerLocation, ok := findLocation(oniSync.Locations, "player3")
 	if !ok {
 		t.Fatalf("鬼向けsyncに未捕獲逃走者player3が含まれていません: %+v", oniSync.Locations)
 	}
-	assertLocationMeta(t, otherRunnerLocation, roomID, "player3", "そうた", 0, false, "#00CC66")
+	assertLocationMeta(t, otherRunnerLocation, roomID, "player3", "そうた", 0, false, "#99A98F")
 	assertLocationCoords(t, otherRunnerLocation, 34.8, 135.6)
 
 	runnerSync := readUntilEvent(t, runnerConn, "sync")
@@ -1169,7 +1169,7 @@ func TestViewerSpecificSyncPayloadAndImmediateFirstSync(t *testing.T) {
 	if !ok {
 		t.Fatalf("逃走者向けsyncに自分の状態が含まれていません: %+v", runnerSync.Locations)
 	}
-	assertLocationMeta(t, selfLocation, roomID, "player2", "みな", 0, false, "#FF00AA")
+	assertLocationMeta(t, selfLocation, roomID, "player2", "みな", 0, false, "#B5EAD7")
 	assertLocationCoords(t, selfLocation, 34.7, 135.5)
 	if _, ok := findLocation(runnerSync.Locations, "player1"); ok {
 		t.Fatalf("逃走者向けsyncに他プレイヤーが含まれています: %+v", runnerSync.Locations)
@@ -1203,7 +1203,7 @@ func TestViewerSpecificSyncPayloadAndImmediateFirstSync(t *testing.T) {
 	if !ok {
 		t.Fatalf("未捕獲逃走者が鬼向けsyncに含まれていません: %+v", oniSyncAfterCapture.Locations)
 	}
-	assertLocationMeta(t, remainingRunnerLocation, roomID, "player3", "そうた", 0, false, "#00CC66")
+	assertLocationMeta(t, remainingRunnerLocation, roomID, "player3", "そうた", 0, false, "#99A98F")
 	assertLocationCoords(t, remainingRunnerLocation, 34.8, 135.6)
 
 	caughtRunnerSync := readUntilEvent(t, runnerConn, "sync")
@@ -1214,7 +1214,7 @@ func TestViewerSpecificSyncPayloadAndImmediateFirstSync(t *testing.T) {
 	if !ok {
 		t.Fatalf("捕獲済み逃走者向けsyncに自分の状態が含まれていません: %+v", caughtRunnerSync.Locations)
 	}
-	assertLocationMeta(t, caughtSelfLocation, roomID, "player2", "みな", 0, true, "#FF00AA")
+	assertLocationMeta(t, caughtSelfLocation, roomID, "player2", "みな", 0, true, "#B5EAD7")
 	assertLocationNoCoords(t, caughtSelfLocation)
 }
 
@@ -1812,11 +1812,11 @@ func TestUpdateRoomSettingsPreservesRoulettePending(t *testing.T) {
 	defer cleanup()
 
 	wsConn1 := connectToRoom(t, baseURL, roomID)
-	sendJSON(t, wsConn1, `{"action":"join","user_id":"player1","name":"Player 1","color":"#0000FF"}`)
+	sendJSON(t, wsConn1, `{"action":"join","user_id":"player1","name":"Player 1","color":"#E2F0CB"}`)
 	_ = readUntilEvent(t, wsConn1, "waiting")
 
 	wsConn2 := connectToRoom(t, baseURL, roomID)
-	sendJSON(t, wsConn2, `{"action":"join","user_id":"player2","name":"Player 2","color":"#3B82F6"}`)
+	sendJSON(t, wsConn2, `{"action":"join","user_id":"player2","name":"Player 2","color":"#93BF4C"}`)
 	_ = readUntilEvent(t, wsConn2, "waiting")
 
 	// ルーレットを準備して開始、停止
@@ -1868,11 +1868,11 @@ func TestResetRestrictedToHost(t *testing.T) {
 	defer cleanup()
 
 	wsConn1 := connectToRoom(t, baseURL, roomID)
-	sendJSON(t, wsConn1, `{"action":"join","user_id":"player1","name":"Player 1","color":"#0000FF"}`)
+	sendJSON(t, wsConn1, `{"action":"join","user_id":"player1","name":"Player 1","color":"#E2F0CB"}`)
 	_ = readUntilEvent(t, wsConn1, "waiting")
 
 	wsConn2 := connectToRoom(t, baseURL, roomID)
-	sendJSON(t, wsConn2, `{"action":"join","user_id":"guest","name":"Guest Player","color":"#3B82F6"}`)
+	sendJSON(t, wsConn2, `{"action":"join","user_id":"guest","name":"Guest Player","color":"#93BF4C"}`)
 	_ = readUntilEvent(t, wsConn2, "waiting")
 
 	// ゲーム開始 (ダミーで開始)
@@ -1916,11 +1916,11 @@ func TestCaptureRequestValidatesPhotoURL(t *testing.T) {
 	defer cleanup()
 
 	wsConn1 := connectToRoom(t, baseURL, roomID)
-	sendJSON(t, wsConn1, `{"action":"join","user_id":"player1","name":"Player 1","color":"#0000FF"}`)
+	sendJSON(t, wsConn1, `{"action":"join","user_id":"player1","name":"Player 1","color":"#E2F0CB"}`)
 	_ = readUntilEvent(t, wsConn1, "waiting")
 
 	wsConn2 := connectToRoom(t, baseURL, roomID)
-	sendJSON(t, wsConn2, `{"action":"join","user_id":"player2","name":"Player 2","color":"#3B82F6"}`)
+	sendJSON(t, wsConn2, `{"action":"join","user_id":"player2","name":"Player 2","color":"#93BF4C"}`)
 	_ = readUntilEvent(t, wsConn2, "waiting")
 
 	// ゲーム開始
@@ -1981,7 +1981,7 @@ func TestReconnectionRaceCondition(t *testing.T) {
 
 	// 1. クライアント1で接続して入室
 	wsConn1 := connectToRoom(t, baseURL, roomID)
-	sendJSON(t, wsConn1, `{"action":"join","user_id":"player1","name":"Player 1","color":"#0000FF"}`)
+	sendJSON(t, wsConn1, `{"action":"join","user_id":"player1","name":"Player 1","color":"#E2F0CB"}`)
 	_ = readUntilEvent(t, wsConn1, "waiting")
 
 	// DBにプレイヤーが存在することを確認
@@ -1989,7 +1989,7 @@ func TestReconnectionRaceCondition(t *testing.T) {
 
 	// 2. 同じ userID で新しいコネクション (wsConn2) から接続して入室
 	wsConn2 := connectToRoom(t, baseURL, roomID)
-	sendJSON(t, wsConn2, `{"action":"join","user_id":"player1","name":"Player 1","color":"#0000FF"}`)
+	sendJSON(t, wsConn2, `{"action":"join","user_id":"player1","name":"Player 1","color":"#E2F0CB"}`)
 	_ = readUntilEvent(t, wsConn2, "waiting")
 
 	// 古いコネクション (wsConn1) が切断されるのを待つ
@@ -1999,10 +1999,10 @@ func TestReconnectionRaceCondition(t *testing.T) {
 	assertDBPlayerExists(t, db, roomID, "player1", true)
 
 	// wsConn2 が生きており、何らかのメッセージが送れる・受信できることを確認
-	sendJSON(t, wsConn2, `{"action":"update_color","color":"#3B82F6"}`)
+	sendJSON(t, wsConn2, `{"action":"update_color","color":"#93BF4C"}`)
 	msg := readUntilEvent(t, wsConn2, "waiting")
 	player, ok := findWaitingPlayer(msg.Players, "player1")
-	if !ok || player.Color != "#3B82F6" {
+	if !ok || player.Color != "#93BF4C" {
 		t.Fatalf("再接続後のカラー更新が反映されていません: got=%+v", msg.Players)
 	}
 }
@@ -2018,11 +2018,11 @@ func TestLeaveTransfersHostInResultState(t *testing.T) {
 	defer cleanup()
 
 	wsConn1 := connectToRoom(t, baseURL, roomID)
-	sendJSON(t, wsConn1, `{"action":"join","user_id":"player1","name":"Player 1","color":"#0000FF"}`)
+	sendJSON(t, wsConn1, `{"action":"join","user_id":"player1","name":"Player 1","color":"#E2F0CB"}`)
 	_ = readUntilEvent(t, wsConn1, "waiting")
 
 	wsConn2 := connectToRoom(t, baseURL, roomID)
-	sendJSON(t, wsConn2, `{"action":"join","user_id":"guest","name":"Guest Player","color":"#3B82F6"}`)
+	sendJSON(t, wsConn2, `{"action":"join","user_id":"guest","name":"Guest Player","color":"#93BF4C"}`)
 	_ = readUntilEvent(t, wsConn2, "waiting")
 
 	// ゲーム開始 (ダミーで開始)

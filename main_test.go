@@ -7,6 +7,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -443,5 +444,72 @@ func TestPutRoomSettingsRejectsMaxPlayersBelowCurrentPlayers(t *testing.T) {
 	if resp.StatusCode != http.StatusBadRequest {
 		payload, _ := io.ReadAll(resp.Body)
 		t.Fatalf("現在人数未満のmax_playersが拒否されていません: status=%d body=%s", resp.StatusCode, payload)
+	}
+}
+
+func TestRoulettePendingNotClearedBySettingsUpdateAndSourceOfTruth(t *testing.T) {
+	roomID := "integrationRouletteSettingsTestRoom"
+	_, server, wsBaseURL, cleanup := newHTTPTestServer(t, models.Room{
+		ID:           roomID,
+		Status:       0,
+		TimeLimit:    900,
+		OniCount:     1,
+		MaxPlayers:   6,
+		AreaSize:     "500m",
+		SyncInterval: 180,
+		GracePeriod:  120,
+	})
+	defer cleanup()
+
+	// 1. ws connection 1 (host) & ws connection 2
+	wsConn1 := connectHTTPTestRoom(t, wsBaseURL, roomID)
+	defer wsConn1.Close()
+
+	_ = joinHTTPTestClient(t, wsConn1, "player1", "はるき")
+
+	wsConn2 := connectHTTPTestRoom(t, wsBaseURL, roomID)
+	defer wsConn2.Close()
+
+	_ = joinHTTPTestClient(t, wsConn2, "player2", "みな")
+
+	// 2. prepare_roulette -> roulette_start -> roulette_stop
+	sendHTTPTestWSJSON(t, wsConn1, `{"action":"prepare_roulette"}`)
+	ready := readHTTPTestUntilEvent(t, wsConn1, "roulette_ready")
+	_ = readHTTPTestUntilEvent(t, wsConn2, "roulette_ready")
+
+	sendHTTPTestWSJSON(t, wsConn1, `{"action":"roulette_start","roulette_session_id":"`+ready.RouletteSessionID+`"}`)
+	started := readHTTPTestUntilEvent(t, wsConn1, "roulette_spin_started")
+	_ = readHTTPTestUntilEvent(t, wsConn2, "roulette_spin_started")
+
+	sendHTTPTestWSJSON(t, wsConn1, `{"action":"roulette_stop","roulette_session_id":"`+ready.RouletteSessionID+`","spin_id":`+strconv.Itoa(started.SpinID)+`}`)
+	stopped := readHTTPTestUntilEvent(t, wsConn1, "roulette_spin_stopped")
+	_ = readHTTPTestUntilEvent(t, wsConn2, "roulette_spin_stopped")
+
+	if len(stopped.SelectedOniUserIDs) == 0 {
+		t.Fatalf("鬼が決定されていません")
+	}
+	selectedOni := stopped.SelectedOniUserIDs[0]
+
+	// 3. PUT /rooms/:id settings update (change time_limit to 1800, keep oni_count=1)
+	putRoomSettings(t, server, roomID, `{
+		"time_limit": 1800,
+		"oni_count": 1,
+		"max_players": 6,
+		"area_size": "500m",
+		"sync_interval": 180,
+		"grace_period": 120
+	}`)
+
+	// 4. start (with empty oni_users to verify the pending roulette is used)
+	sendHTTPTestWSJSON(t, wsConn1, `{"action":"start"}`)
+	start1 := readHTTPTestUntilEvent(t, wsConn1, "start")
+	start2 := readHTTPTestUntilEvent(t, wsConn2, "start")
+
+	// Verify that the selected oni matches what roulette chose
+	if len(start1.OniUsers) != 1 || start1.OniUsers[0] != selectedOni {
+		t.Fatalf("開始後の鬼がルーレットで決まった鬼 (%s) と一致しません: %+v", selectedOni, start1.OniUsers)
+	}
+	if len(start2.OniUsers) != 1 || start2.OniUsers[0] != selectedOni {
+		t.Fatalf("開始後の鬼がルーレットで決まった鬼 (%s) と一致しません: %+v", selectedOni, start2.OniUsers)
 	}
 }
