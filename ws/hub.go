@@ -138,17 +138,24 @@ func isValidPhotoURL(urlStr string) bool {
 	if urlStr == "" {
 		return false
 	}
+	if !strings.HasPrefix(urlStr, "https://") {
+		return false
+	}
+	if strings.Contains(urlStr, "localhost") || strings.Contains(urlStr, "127.0.0.1") {
+		return false
+	}
 	supabaseURL := os.Getenv("SUPABASE_URL")
 	if supabaseURL != "" {
 		prefix := supabaseURL + "/storage/v1/object/public/"
 		if strings.HasPrefix(urlStr, prefix) {
 			return true
 		}
+		if strings.HasPrefix(urlStr, "https://example.com/") {
+			return true
+		}
+		return false
 	}
-	if strings.HasPrefix(urlStr, "https://example.com/") {
-		return true
-	}
-	return false
+	return true
 }
 
 func (h *Hub) UpdateRoomSettings(roomID string, timeLimit, oniCount int, areaSize string, syncInterval, gracePeriod int) {
@@ -157,7 +164,7 @@ func (h *Hub) UpdateRoomSettings(roomID string, timeLimit, oniCount int, areaSiz
 	room := h.GetOrCreateRoom(roomID)
 	room.mu.Lock()
 	defer room.mu.Unlock()
-	if room.OniCount != oniCount {
+	if room.OniCount != 0 && room.OniCount != oniCount {
 		clearPendingRouletteLocked(room)
 	}
 	room.TimeLimit = timeLimit
@@ -176,7 +183,7 @@ func (h *Hub) UpdateRoomSettingsFromModel(room models.Room) *RoomState {
 	roomState := h.GetOrCreateRoom(room.ID)
 	roomState.mu.Lock()
 	defer roomState.mu.Unlock()
-	if roomState.OniCount != room.OniCount {
+	if roomState.OniCount != 0 && roomState.OniCount != room.OniCount {
 		clearPendingRouletteLocked(roomState)
 	}
 	roomState.Status = room.Status
@@ -280,24 +287,38 @@ func isReservedPlayerColor(color string) bool {
 	return strings.EqualFold(color, "#000000") || strings.EqualFold(color, "black")
 }
 
+func isAllowedPlayerColor(color string) bool {
+	normalized, ok := normalizeHexColor(color)
+	if !ok {
+		return false
+	}
+	for _, pColor := range playerColorPalette {
+		if strings.EqualFold(normalized, pColor) {
+			return true
+		}
+	}
+	return false
+}
+
 var (
 	errNoAvailablePlayerColor = errors.New("利用可能なカラーがありません")
 	playerColorPalette        = []string{
-		"#EF4444",
-		"#F97316",
-		"#F59E0B",
-		"#84CC16",
-		"#22C55E",
-		"#14B8A6",
-		"#06B6D4",
-		"#0EA5E9",
-		"#3B82F6",
-		"#6366F1",
-		"#8B5CF6",
-		"#A855F7",
-		"#D946EF",
-		"#EC4899",
-		"#F43F5E",
+		"#E2F0CB",
+		"#B5EAD7",
+		"#99A98F",
+		"#93BF4C",
+		"#C7CEEA",
+		"#E8AEFF",
+		"#B550B5",
+		"#5C388B",
+		"#FFC8A2",
+		"#FF9AA2",
+		"#FF5563",
+		"#F64574",
+		"#81E6D9",
+		"#7FB5FF",
+		"#226DA2",
+		"#1E4370",
 	}
 )
 
@@ -347,18 +368,19 @@ func firstAvailablePlayerColor(db *gorm.DB, roomID, userID string) (string, erro
 }
 
 func safeJoinColor(db *gorm.DB, roomID, userID, requestedColor string) (string, error) {
-	if requestedColor == "" || isReservedPlayerColor(requestedColor) {
+	if requestedColor == "" || isReservedPlayerColor(requestedColor) || !isAllowedPlayerColor(requestedColor) {
 		return firstAvailablePlayerColor(db, roomID, userID)
 	}
 
-	used, err := colorUsedByOtherPlayer(db, roomID, userID, requestedColor)
+	normalizedColor, _ := normalizeHexColor(requestedColor)
+	used, err := colorUsedByOtherPlayer(db, roomID, userID, normalizedColor)
 	if err != nil {
 		return "", err
 	}
 	if used {
 		return firstAvailablePlayerColor(db, roomID, userID)
 	}
-	return requestedColor, nil
+	return normalizedColor, nil
 }
 
 func clearPendingRouletteLocked(room *RoomState) {
@@ -695,7 +717,11 @@ func (h *Hub) Unregister(roomID string, client *Client, db *gorm.DB) {
 			clearPendingRouletteLocked(room)
 			room.mu.Unlock()
 			if !isEmpty {
-				room.Broadcast(room.waitingMessage())
+				if status == 0 {
+					room.Broadcast(room.waitingMessage())
+				} else if status == 2 {
+					room.Broadcast(room.resultMessageBestEffort(roomID, db))
+				}
 			}
 		}
 	}
@@ -1022,6 +1048,10 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 			}
 			if isReservedPlayerColor(normalizedColor) {
 				sendError(client, "黒は鬼用のカラーです")
+				continue
+			}
+			if !isAllowedPlayerColor(normalizedColor) {
+				sendError(client, "許可されていないカラーです")
 				continue
 			}
 			if !strings.EqualFold(player.Color, normalizedColor) {
