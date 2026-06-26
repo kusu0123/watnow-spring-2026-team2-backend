@@ -48,7 +48,7 @@ curl -X POST http://localhost:8080/rooms
 ```sh
 curl -X PUT http://localhost:8080/rooms/1234 \
   -H "Content-Type: application/json" \
-  -d '{"time_limit":900,"oni_count":1,"area_size":"school-yard","sync_interval":3,"grace_period":30}'
+  -d '{"time_limit":900,"oni_count":1,"area_size":"100","sync_interval":180,"grace_period":120}'
 ```
 
 WebSocket の動作確認は、フロントエンドまたは WebSocket クライアントから `/ws/rooms/:room_id` に接続して行います。

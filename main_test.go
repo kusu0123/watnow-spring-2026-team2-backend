@@ -241,7 +241,7 @@ func TestPutRoomSettingsBroadcastsAndSavesAreaCenter(t *testing.T) {
 		"time_limit": 900,
 		"oni_count": 1,
 		"max_players": 8,
-		"area_size": "500m",
+		"area_size": "100",
 		"sync_interval": 180,
 		"grace_period": 120,
 		"mission_enabled": true,
@@ -250,8 +250,8 @@ func TestPutRoomSettingsBroadcastsAndSavesAreaCenter(t *testing.T) {
 
 	settings1 := readHTTPTestUntilEvent(t, wsConn1, "room_settings")
 	settings2 := readHTTPTestUntilEvent(t, wsConn2, "room_settings")
-	assertHTTPTestRoomSettings(t, settings1, 900, 1, "500m", 180, 120, 34.0, 135.0)
-	assertHTTPTestRoomSettings(t, settings2, 900, 1, "500m", 180, 120, 34.0, 135.0)
+	assertHTTPTestRoomSettings(t, settings1, 900, 1, "100", 180, 120, 34.0, 135.0)
+	assertHTTPTestRoomSettings(t, settings2, 900, 1, "100", 180, 120, 34.0, 135.0)
 	if settings1.MaxPlayers != 8 || settings2.MaxPlayers != 8 {
 		t.Fatalf("max_playersがbroadcastされていません: settings1=%+v settings2=%+v", settings1, settings2)
 	}
@@ -291,7 +291,7 @@ func TestPutRoomSettingsBroadcastsAndSavesAreaCenter(t *testing.T) {
 		GracePeriod:    stateSettings.GracePeriod,
 		MissionEnabled: stateSettings.MissionEnabled,
 		AreaCenter:     stateSettings.AreaCenter,
-	}, 900, 1, "500m", 180, 120, 34.0, 135.0)
+	}, 900, 1, "100", 180, 120, 34.0, 135.0)
 }
 
 func TestPutRoomSettingsAllowsMissingUserIDAndRejectsHostMismatchWhenUserIDProvided(t *testing.T) {
@@ -302,7 +302,7 @@ func TestPutRoomSettingsAllowsMissingUserIDAndRejectsHostMismatchWhenUserIDProvi
 		TimeLimit:    900,
 		OniCount:     1,
 		MaxPlayers:   6,
-		AreaSize:     "300m",
+		AreaSize:     "300",
 		SyncInterval: 60,
 		GracePeriod:  60,
 		HostUserID:   "player1",
@@ -318,7 +318,7 @@ func TestPutRoomSettingsAllowsMissingUserIDAndRejectsHostMismatchWhenUserIDProvi
 		}
 	}
 
-	validSettings := `"time_limit":900,"oni_count":1,"max_players":6,"area_size":"300m","sync_interval":60,"grace_period":60`
+	validSettings := `"time_limit":900,"oni_count":1,"max_players":6,"area_size":"300","sync_interval":60,"grace_period":60`
 	resp := putRoomSettingsRaw(t, server, roomID, `{`+validSettings+`}`)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -361,7 +361,7 @@ func TestPutRoomSettingsWithoutAreaCenterPreservesExistingCenter(t *testing.T) {
 		Status:        0,
 		TimeLimit:     900,
 		OniCount:      1,
-		AreaSize:      "500m",
+		AreaSize:      "100",
 		SyncInterval:  180,
 		GracePeriod:   120,
 		AreaCenterLat: 34.0,
@@ -373,18 +373,18 @@ func TestPutRoomSettingsWithoutAreaCenterPreservesExistingCenter(t *testing.T) {
 	wsConn := connectHTTPTestRoom(t, wsBaseURL, roomID)
 	defer wsConn.Close()
 	joinSettings := joinHTTPTestClient(t, wsConn, "player1", "はるき")
-	assertHTTPTestRoomSettings(t, joinSettings, 900, 1, "500m", 180, 120, 34.0, 135.0)
+	assertHTTPTestRoomSettings(t, joinSettings, 900, 1, "100", 180, 120, 34.0, 135.0)
 
 	putRoomSettings(t, server, roomID, `{
 		"time_limit": 600,
 		"oni_count": 2,
-		"area_size": "700m",
+		"area_size": "300",
 		"sync_interval": 60,
 		"grace_period": 60
 	}`)
 
 	settings := readHTTPTestUntilEvent(t, wsConn, "room_settings")
-	assertHTTPTestRoomSettings(t, settings, 600, 2, "700m", 60, 60, 34.0, 135.0)
+	assertHTTPTestRoomSettings(t, settings, 600, 2, "300", 60, 60, 34.0, 135.0)
 
 	var savedRoom models.Room
 	if err := db.First(&savedRoom, "id = ?", roomID).Error; err != nil {
@@ -407,7 +407,7 @@ func TestPutRoomSettingsRejectsInvalidStep3Values(t *testing.T) {
 		Status:       0,
 		TimeLimit:    900,
 		OniCount:     1,
-		AreaSize:     "500m",
+		AreaSize:     "100",
 		SyncInterval: 180,
 		GracePeriod:  120,
 	})
@@ -419,39 +419,39 @@ func TestPutRoomSettingsRejectsInvalidStep3Values(t *testing.T) {
 	}{
 		{
 			name: "oniCountZero",
-			body: `{"time_limit":900,"oni_count":0,"area_size":"500m","sync_interval":180,"grace_period":120}`,
+			body: `{"time_limit":900,"oni_count":0,"area_size":"100","sync_interval":180,"grace_period":120}`,
 		},
 		{
 			name: "oniCountFour",
-			body: `{"time_limit":900,"oni_count":4,"area_size":"500m","sync_interval":180,"grace_period":120}`,
+			body: `{"time_limit":900,"oni_count":4,"area_size":"100","sync_interval":180,"grace_period":120}`,
 		},
 		{
 			name: "maxPlayersOne",
-			body: `{"time_limit":900,"oni_count":1,"max_players":1,"area_size":"500m","sync_interval":180,"grace_period":120}`,
+			body: `{"time_limit":900,"oni_count":1,"max_players":1,"area_size":"100","sync_interval":180,"grace_period":120}`,
 		},
 		{
 			name: "maxPlayersSixteen",
-			body: `{"time_limit":900,"oni_count":1,"max_players":16,"area_size":"500m","sync_interval":180,"grace_period":120}`,
+			body: `{"time_limit":900,"oni_count":1,"max_players":16,"area_size":"100","sync_interval":180,"grace_period":120}`,
 		},
 		{
 			name: "maxPlayersEqualsOniCount",
-			body: `{"time_limit":900,"oni_count":2,"max_players":2,"area_size":"500m","sync_interval":180,"grace_period":120}`,
+			body: `{"time_limit":900,"oni_count":2,"max_players":2,"area_size":"100","sync_interval":180,"grace_period":120}`,
 		},
 		{
 			name: "invalidTimeLimit",
-			body: `{"time_limit":300,"oni_count":1,"area_size":"500m","sync_interval":180,"grace_period":120}`,
+			body: `{"time_limit":300,"oni_count":1,"area_size":"100","sync_interval":180,"grace_period":120}`,
 		},
 		{
 			name: "invalidSyncInterval",
-			body: `{"time_limit":900,"oni_count":1,"area_size":"500m","sync_interval":90,"grace_period":120}`,
+			body: `{"time_limit":900,"oni_count":1,"area_size":"100","sync_interval":90,"grace_period":120}`,
 		},
 		{
 			name: "invalidGracePeriod",
-			body: `{"time_limit":900,"oni_count":1,"area_size":"500m","sync_interval":180,"grace_period":30}`,
+			body: `{"time_limit":900,"oni_count":1,"area_size":"100","sync_interval":180,"grace_period":30}`,
 		},
 		{
 			name: "invalidMissionEnabledType",
-			body: `{"time_limit":900,"oni_count":1,"area_size":"500m","sync_interval":180,"grace_period":120,"mission_enabled":"yes"}`,
+			body: `{"time_limit":900,"oni_count":1,"area_size":"100","sync_interval":180,"grace_period":120,"mission_enabled":"yes"}`,
 		},
 	}
 
@@ -475,7 +475,7 @@ func TestPutRoomSettingsRejectsMaxPlayersBelowCurrentPlayers(t *testing.T) {
 		TimeLimit:    900,
 		OniCount:     1,
 		MaxPlayers:   6,
-		AreaSize:     "500m",
+		AreaSize:     "100",
 		SyncInterval: 180,
 		GracePeriod:  120,
 	})
@@ -496,7 +496,7 @@ func TestPutRoomSettingsRejectsMaxPlayersBelowCurrentPlayers(t *testing.T) {
 		"time_limit": 900,
 		"oni_count": 1,
 		"max_players": 2,
-		"area_size": "500m",
+		"area_size": "100",
 		"sync_interval": 180,
 		"grace_period": 120
 	}`)
@@ -515,7 +515,7 @@ func TestRoulettePendingNotClearedBySettingsUpdateAndSourceOfTruth(t *testing.T)
 		TimeLimit:    900,
 		OniCount:     1,
 		MaxPlayers:   6,
-		AreaSize:     "500m",
+		AreaSize:     "100",
 		SyncInterval: 180,
 		GracePeriod:  120,
 	})
@@ -555,7 +555,7 @@ func TestRoulettePendingNotClearedBySettingsUpdateAndSourceOfTruth(t *testing.T)
 		"time_limit": 1800,
 		"oni_count": 1,
 		"max_players": 6,
-		"area_size": "500m",
+		"area_size": "100",
 		"sync_interval": 180,
 		"grace_period": 120
 	}`)

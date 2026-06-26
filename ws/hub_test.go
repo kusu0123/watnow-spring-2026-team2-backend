@@ -1184,7 +1184,7 @@ func TestJoinSendsRoomSettingsToJoiningClient(t *testing.T) {
 		Status:        0,
 		TimeLimit:     900,
 		OniCount:      1,
-		AreaSize:      "500m",
+		AreaSize:      "100",
 		SyncInterval:  180,
 		GracePeriod:   120,
 		AreaCenterLat: 34.0,
@@ -1202,7 +1202,7 @@ func TestJoinSendsRoomSettingsToJoiningClient(t *testing.T) {
 	}
 
 	settings := readRawMessage(t, wsConn)
-	assertRoomSettings(t, settings, 900, 1, "500m", 180, 120, &AreaCenterVal{Lat: 34.0, Lng: 135.0})
+	assertRoomSettings(t, settings, 900, 1, "100", 180, 120, &AreaCenterVal{Lat: 34.0, Lng: 135.0})
 }
 
 func TestWebSocketStartFlowWithSettings(t *testing.T) {
@@ -1234,11 +1234,11 @@ func TestWebSocketStartFlowWithSettings(t *testing.T) {
 		t.Fatalf("想定外のイベント: %s", msg.Event)
 	}
 
-	GameHub.UpdateRoomSettings(roomID, 120, 1, "school-yard", 1, 0)
+	GameHub.UpdateRoomSettings(roomID, 120, 1, "100", 1, 0)
 
 	room := GameHub.GetOrCreateRoom(roomID)
 	room.mu.RLock()
-	if room.AreaSize != "school-yard" || room.SyncInterval != 1 || room.GracePeriod != 0 {
+	if room.AreaSize != "100" || room.SyncInterval != 1 || room.GracePeriod != 0 {
 		room.mu.RUnlock()
 		t.Fatalf("設定反映失敗: area_size=%s sync_interval=%d grace_period=%d", room.AreaSize, room.SyncInterval, room.GracePeriod)
 	}

@@ -53,7 +53,7 @@ POST /rooms
   "time_limit": 900,
   "oni_count": 0,
   "max_players": 6,
-  "area_size": "",
+  "area_size": "100",
   "sync_interval": 0,
   "grace_period": 0,
   "created_at": "2026-01-01T00:00:00Z"
@@ -66,6 +66,7 @@ POST /rooms
 - 作成直後の `status` は `0` です。
 - `time_limit` の初期値は 900 秒です。
 - `max_players` の初期値は 6 人です。
+- `area_size` の初期値は `"100"` です。
 - `oni_count`, `sync_interval`, `grace_period` は必要に応じて設定更新 API で上書きします。
 
 ### ルーム設定更新
@@ -82,7 +83,7 @@ Content-Type: application/json
   "time_limit": 900,
   "oni_count": 1,
   "max_players": 6,
-  "area_size": "school-yard",
+  "area_size": "100",
   "sync_interval": 180,
   "grace_period": 120,
   "area_center": {
@@ -97,7 +98,7 @@ Content-Type: application/json
 - `time_limit`: 600 / 900 / 1800 秒
 - `oni_count`: 1 から 3 人
 - `max_players`: 2 から 15 人。現在参加人数未満、または `oni_count` 以下にはできません。
-- `area_size`: 50 文字以下
+- `area_size`: 50 / 100 / 300。数値または文字列で送信できます。
 - `sync_interval`: 60 / 180 / 300 秒
 - `grace_period`: 60 / 120 / 180 秒
 - `area_center`: 任意。指定する場合、`lat` は -90 から 90、`lng` は -180 から 180
@@ -488,7 +489,7 @@ Step3 時点の実装では `request_id` はまだありません。Step4 以降
   "time_limit": 900,
   "oni_count": 1,
   "max_players": 6,
-  "area_size": "500m",
+  "area_size": "100",
   "sync_interval": 180,
   "grace_period": 120,
   "mission_enabled": false,
