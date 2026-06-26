@@ -221,11 +221,32 @@ func stopRouletteSpin(t *testing.T, hostConn, guestConn *websocket.Conn, session
 		t.Fatalf("roulette_spin_stoppedのsession/spinが不正です: host=%+v guest=%+v", hostStopped, guestStopped)
 	}
 	if len(hostStopped.SelectedOniUserIDs) == 0 || strings.Join(hostStopped.SelectedOniUserIDs, ",") != strings.Join(guestStopped.SelectedOniUserIDs, ",") ||
+		hostStopped.SelectedOniUserID != hostStopped.SelectedOniUserIDs[0] ||
+		guestStopped.SelectedOniUserID != hostStopped.SelectedOniUserIDs[0] ||
+		hostStopped.RevealedOniCount != 1 || guestStopped.RevealedOniCount != 1 ||
 		hostStopped.StopAt == "" || hostStopped.StopAt != guestStopped.StopAt ||
 		hostStopped.DecelerationMS != rouletteDecelerationMS || guestStopped.DecelerationMS != rouletteDecelerationMS {
 		t.Fatalf("host/guestのroulette_spin_stopped payloadが一致していません: host=%+v guest=%+v", hostStopped, guestStopped)
 	}
 	return hostStopped
+}
+
+func revealNextOni(t *testing.T, hostConn, guestConn *websocket.Conn, sessionID string, wantIndex int) OutgoingMessage {
+	t.Helper()
+
+	sendJSON(t, hostConn, fmt.Sprintf(`{"action":"roulette_reveal_next","roulette_session_id":%q}`, sessionID))
+	hostReveal := readUntilEvent(t, hostConn, "roulette_reveal_next")
+	guestReveal := readUntilEvent(t, guestConn, "roulette_reveal_next")
+	if hostReveal.RouletteSessionID != sessionID || guestReveal.RouletteSessionID != sessionID ||
+		hostReveal.RevealIndex == nil || guestReveal.RevealIndex == nil ||
+		*hostReveal.RevealIndex != wantIndex || *guestReveal.RevealIndex != wantIndex ||
+		hostReveal.SelectedOniUserID == "" || hostReveal.SelectedOniUserID != guestReveal.SelectedOniUserID ||
+		hostReveal.RevealedOniCount != wantIndex+1 || guestReveal.RevealedOniCount != wantIndex+1 ||
+		strings.Join(hostReveal.SelectedOniUserIDs, ",") != strings.Join(guestReveal.SelectedOniUserIDs, ",") ||
+		hostReveal.SelectedOniUserID != hostReveal.SelectedOniUserIDs[wantIndex] {
+		t.Fatalf("host/guestのroulette_reveal_next payloadが不正です: host=%+v guest=%+v", hostReveal, guestReveal)
+	}
+	return hostReveal
 }
 
 func waitFor(t *testing.T, check func() bool) {
@@ -764,6 +785,9 @@ func TestNonHostCannotStartOrControlRoulette(t *testing.T) {
 	started := startRouletteSpin(t, hostConn, guestConn, ready.RouletteSessionID)
 	sendJSON(t, guestConn, fmt.Sprintf(`{"action":"roulette_stop","roulette_session_id":%q,"spin_id":%d}`, ready.RouletteSessionID, started.SpinID))
 	assertErrorMessage(t, guestConn, "ホストのみ実行できます")
+	stopRouletteSpin(t, hostConn, guestConn, ready.RouletteSessionID, started.SpinID)
+	sendJSON(t, guestConn, fmt.Sprintf(`{"action":"roulette_reveal_next","roulette_session_id":%q}`, ready.RouletteSessionID))
+	assertErrorMessage(t, guestConn, "ホストのみ実行できます")
 	sendJSON(t, guestConn, fmt.Sprintf(`{"action":"roulette_reset","roulette_session_id":%q}`, ready.RouletteSessionID))
 	assertErrorMessage(t, guestConn, "ホストのみ実行できます")
 }
@@ -802,6 +826,106 @@ func TestRouletteFlowBroadcastsToRoom(t *testing.T) {
 	if len(stopped.SelectedOniUserIDs) != 1 {
 		t.Fatalf("roulette_stopのselected_oni_user_ids数が不正です: %+v", stopped)
 	}
+}
+
+func TestRouletteRevealNextBroadcastsPendingOni(t *testing.T) {
+	roomID := "rouletteRevealNextRoom"
+	_, baseURL, cleanup := newTestServer(t, models.Room{
+		ID:        roomID,
+		Status:    0,
+		TimeLimit: 900,
+		OniCount:  2,
+	})
+	defer cleanup()
+
+	hostConn := connectToRoom(t, baseURL, roomID)
+	defer hostConn.Close()
+	guestConn := connectToRoom(t, baseURL, roomID)
+	defer guestConn.Close()
+	thirdConn := connectToRoom(t, baseURL, roomID)
+	defer thirdConn.Close()
+
+	sendJSON(t, hostConn, `{"action":"join","user_id":"player1","name":"はるき"}`)
+	readUntilEvent(t, hostConn, "waiting")
+	sendJSON(t, guestConn, `{"action":"join","user_id":"player2","name":"みな"}`)
+	readUntilEvent(t, hostConn, "waiting")
+	readUntilEvent(t, guestConn, "waiting")
+	sendJSON(t, thirdConn, `{"action":"join","user_id":"player3","name":"そうた"}`)
+	readUntilEvent(t, hostConn, "waiting")
+	readUntilEvent(t, guestConn, "waiting")
+	readUntilEvent(t, thirdConn, "waiting")
+
+	ready := prepareRoulette(t, hostConn, guestConn)
+	started := startRouletteSpin(t, hostConn, guestConn, ready.RouletteSessionID)
+	stopped := stopRouletteSpin(t, hostConn, guestConn, ready.RouletteSessionID, started.SpinID)
+	if len(stopped.SelectedOniUserIDs) != 2 {
+		t.Fatalf("roulette_stopのselected_oni_user_ids数が不正です: %+v", stopped)
+	}
+
+	room := GameHub.GetOrCreateRoom(roomID)
+	room.mu.RLock()
+	if len(room.Roulette.PendingOniUserIDs) != 2 || room.Roulette.RevealedOniCount != 1 {
+		t.Fatalf("roulette_stop後のstateが不正です: %+v", room.Roulette)
+	}
+	room.mu.RUnlock()
+
+	revealed := revealNextOni(t, hostConn, guestConn, ready.RouletteSessionID, 1)
+	if strings.Join(revealed.SelectedOniUserIDs, ",") != strings.Join(stopped.SelectedOniUserIDs, ",") {
+		t.Fatalf("reveal_nextで決定済み鬼配列が変わっています: stopped=%+v revealed=%+v", stopped, revealed)
+	}
+
+	reconnectConn := connectToRoom(t, baseURL, roomID)
+	defer reconnectConn.Close()
+	sendJSON(t, reconnectConn, `{"action":"join","user_id":"player2","name":"みな"}`)
+	readUntilEvent(t, hostConn, "waiting")
+	readRawEvent(t, reconnectConn, "waiting")
+	readRawEvent(t, reconnectConn, "room_settings")
+	readRawEvent(t, reconnectConn, "roulette_ready")
+	stopSnapshot := readRawEvent(t, reconnectConn, "roulette_spin_stopped")
+	if strings.Join(stopSnapshot.SelectedOniUserIDs, ",") != strings.Join(stopped.SelectedOniUserIDs, ",") ||
+		stopSnapshot.RevealedOniCount != 2 {
+		t.Fatalf("reveal後のroulette snapshotが不正です: %+v", stopSnapshot)
+	}
+
+	sendJSON(t, hostConn, fmt.Sprintf(`{"action":"roulette_reveal_next","roulette_session_id":%q}`, ready.RouletteSessionID))
+	assertErrorMessage(t, hostConn, "未発表の鬼はいません")
+}
+
+func TestRouletteRevealNextRejectsSessionMismatchAndNotStopped(t *testing.T) {
+	roomID := "rouletteRevealNextValidationRoom"
+	_, baseURL, cleanup := newTestServer(t, models.Room{
+		ID:        roomID,
+		Status:    0,
+		TimeLimit: 900,
+		OniCount:  2,
+	})
+	defer cleanup()
+
+	hostConn := connectToRoom(t, baseURL, roomID)
+	defer hostConn.Close()
+	guestConn := connectToRoom(t, baseURL, roomID)
+	defer guestConn.Close()
+	thirdConn := connectToRoom(t, baseURL, roomID)
+	defer thirdConn.Close()
+
+	sendJSON(t, hostConn, `{"action":"join","user_id":"player1","name":"はるき"}`)
+	readUntilEvent(t, hostConn, "waiting")
+	sendJSON(t, guestConn, `{"action":"join","user_id":"player2","name":"みな"}`)
+	readUntilEvent(t, hostConn, "waiting")
+	readUntilEvent(t, guestConn, "waiting")
+	sendJSON(t, thirdConn, `{"action":"join","user_id":"player3","name":"そうた"}`)
+	readUntilEvent(t, hostConn, "waiting")
+	readUntilEvent(t, guestConn, "waiting")
+	readUntilEvent(t, thirdConn, "waiting")
+
+	ready := prepareRoulette(t, hostConn, guestConn)
+	sendJSON(t, hostConn, fmt.Sprintf(`{"action":"roulette_reveal_next","roulette_session_id":%q}`, ready.RouletteSessionID))
+	assertErrorMessage(t, hostConn, "ルーレットは停止していません")
+
+	started := startRouletteSpin(t, hostConn, guestConn, ready.RouletteSessionID)
+	stopRouletteSpin(t, hostConn, guestConn, ready.RouletteSessionID, started.SpinID)
+	sendJSON(t, hostConn, `{"action":"roulette_reveal_next","roulette_session_id":"wrong-session"}`)
+	assertErrorMessage(t, hostConn, "ルーレットセッションが見つかりません")
 }
 
 func TestRouletteReadySnapshotSentOnReconnect(t *testing.T) {
@@ -920,6 +1044,7 @@ func TestRouletteStoppedSnapshotSentOnReconnect(t *testing.T) {
 	if stopSnapshot.RouletteSessionID != stopped.RouletteSessionID || stopSnapshot.SpinID != stopped.SpinID ||
 		strings.Join(stopSnapshot.RouletteOrder, ",") != strings.Join(ready.RouletteOrder, ",") ||
 		strings.Join(stopSnapshot.SelectedOniUserIDs, ",") != strings.Join(stopped.SelectedOniUserIDs, ",") ||
+		stopSnapshot.RevealedOniCount != stopped.RevealedOniCount ||
 		stopSnapshot.StartsAt != started.StartsAt || stopSnapshot.StopAt != stopped.StopAt ||
 		stopSnapshot.DecelerationMS != rouletteDecelerationMS {
 		t.Fatalf("roulette_spin_stopped snapshotが不正です: stopped=%+v snapshot=%+v", stopped, stopSnapshot)
@@ -1046,7 +1171,7 @@ func TestRouletteResetClearsPendingAndAllowsNewStop(t *testing.T) {
 
 	room := GameHub.GetOrCreateRoom(roomID)
 	room.mu.RLock()
-	if len(room.Roulette.PendingOniUserIDs) != 0 || room.Roulette.Status != rouletteStatusReady {
+	if len(room.Roulette.PendingOniUserIDs) != 0 || room.Roulette.RevealedOniCount != 0 || room.Roulette.Status != rouletteStatusReady {
 		t.Fatalf("roulette_reset後のstateが不正です: %+v", room.Roulette)
 	}
 	room.mu.RUnlock()
@@ -1567,7 +1692,7 @@ func TestResetAfterResultKeepsConnectedPlayersAndAllowsRestart(t *testing.T) {
 	})
 	assertDBPlayerExists(t, db, roomID, "player3", false)
 	room.mu.RLock()
-	if room.Roulette.SessionID != "" || len(room.Roulette.PendingOniUserIDs) != 0 {
+	if room.Roulette.SessionID != "" || len(room.Roulette.PendingOniUserIDs) != 0 || room.Roulette.RevealedOniCount != 0 {
 		t.Fatalf("reset後にroulette stateが残っています: %+v", room.Roulette)
 	}
 	room.mu.RUnlock()
