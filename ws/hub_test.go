@@ -152,6 +152,16 @@ func readUntilEvent(t *testing.T, wsConn *websocket.Conn, event string) Outgoing
 	return OutgoingMessage{}
 }
 
+func readRawEvent(t *testing.T, wsConn *websocket.Conn, event string) OutgoingMessage {
+	t.Helper()
+
+	msg := readRawMessage(t, wsConn)
+	if msg.Event != event {
+		t.Fatalf("想定外のイベント: got=%s want=%s msg=%+v", msg.Event, event, msg)
+	}
+	return msg
+}
+
 func assertErrorMessage(t *testing.T, wsConn *websocket.Conn, message string) {
 	t.Helper()
 
@@ -230,6 +240,15 @@ func waitFor(t *testing.T, check func() bool) {
 	}
 
 	t.Fatal("条件が時間内に満たされませんでした")
+}
+
+func setDisconnectGraceForTest(t *testing.T, grace time.Duration) {
+	t.Helper()
+
+	old := disconnectGraceNanos.Swap(int64(grace))
+	t.Cleanup(func() {
+		disconnectGraceNanos.Store(old)
+	})
 }
 
 func findClient(room *RoomState, userID string) (*Client, bool) {
@@ -392,6 +411,8 @@ func TestPlayerColorPaletteMatchesFrontendContract(t *testing.T) {
 }
 
 func TestWebSocketFlow(t *testing.T) {
+	setDisconnectGraceForTest(t, 100*time.Millisecond)
+
 	roomID := "testRoom"
 	db, baseURL, cleanup := newTestServer(t, models.Room{
 		ID:        roomID,
@@ -432,16 +453,18 @@ func TestWebSocketFlow(t *testing.T) {
 
 	_ = wsConn.Close()
 	waitFor(t, func() bool {
-		return !roomExists(roomID)
+		_, ok := findClient(room, "player1")
+		return !ok
 	})
+	assertDBPlayerExists(t, db, roomID, "player1", true)
 
-	var count int64
-	if err := db.Model(&models.Player{}).Where("room_id = ? AND user_id = ?", roomID, "player1").Count(&count).Error; err != nil {
-		t.Fatalf("プレイヤー件数取得失敗: %v", err)
-	}
-	if count != 0 {
-		t.Fatalf("waiting中の切断後はプレイヤーが削除される想定ですが、%d件でした", count)
-	}
+	waitFor(t, func() bool {
+		var count int64
+		if err := db.Model(&models.Player{}).Where("room_id = ? AND user_id = ?", roomID, "player1").Count(&count).Error; err != nil {
+			return false
+		}
+		return count == 0 && !roomExists(roomID)
+	})
 }
 
 func TestJoinRejectsPaletteOutsideHexColor(t *testing.T) {
@@ -778,6 +801,128 @@ func TestRouletteFlowBroadcastsToRoom(t *testing.T) {
 	stopped := stopRouletteSpin(t, hostConn, guestConn, ready.RouletteSessionID, started.SpinID)
 	if len(stopped.SelectedOniUserIDs) != 1 {
 		t.Fatalf("roulette_stopのselected_oni_user_ids数が不正です: %+v", stopped)
+	}
+}
+
+func TestRouletteReadySnapshotSentOnReconnect(t *testing.T) {
+	roomID := "rouletteReadyReconnectRoom"
+	_, baseURL, cleanup := newTestServer(t, models.Room{
+		ID:        roomID,
+		Status:    0,
+		TimeLimit: 900,
+		OniCount:  1,
+	})
+	defer cleanup()
+
+	hostConn := connectToRoom(t, baseURL, roomID)
+	defer hostConn.Close()
+	guestConn := connectToRoom(t, baseURL, roomID)
+	defer guestConn.Close()
+
+	sendJSON(t, hostConn, `{"action":"join","user_id":"player1","name":"はるき"}`)
+	readUntilEvent(t, hostConn, "waiting")
+	sendJSON(t, guestConn, `{"action":"join","user_id":"player2","name":"みな"}`)
+	readUntilEvent(t, hostConn, "waiting")
+	readUntilEvent(t, guestConn, "waiting")
+
+	ready := prepareRoulette(t, hostConn, guestConn)
+
+	reconnectConn := connectToRoom(t, baseURL, roomID)
+	defer reconnectConn.Close()
+	sendJSON(t, reconnectConn, `{"action":"join","user_id":"player2","name":"みな"}`)
+	readRawEvent(t, reconnectConn, "waiting")
+	readRawEvent(t, reconnectConn, "room_settings")
+	snapshot := readRawEvent(t, reconnectConn, "roulette_ready")
+
+	if snapshot.RouletteSessionID != ready.RouletteSessionID || strings.Join(snapshot.RouletteOrder, ",") != strings.Join(ready.RouletteOrder, ",") {
+		t.Fatalf("roulette_ready snapshotが既存stateを復元していません: ready=%+v snapshot=%+v", ready, snapshot)
+	}
+}
+
+func TestRouletteSpinningSnapshotSentOnReconnect(t *testing.T) {
+	roomID := "rouletteSpinningReconnectRoom"
+	_, baseURL, cleanup := newTestServer(t, models.Room{
+		ID:        roomID,
+		Status:    0,
+		TimeLimit: 900,
+		OniCount:  1,
+	})
+	defer cleanup()
+
+	hostConn := connectToRoom(t, baseURL, roomID)
+	defer hostConn.Close()
+	guestConn := connectToRoom(t, baseURL, roomID)
+	defer guestConn.Close()
+
+	sendJSON(t, hostConn, `{"action":"join","user_id":"player1","name":"はるき"}`)
+	readUntilEvent(t, hostConn, "waiting")
+	sendJSON(t, guestConn, `{"action":"join","user_id":"player2","name":"みな"}`)
+	readUntilEvent(t, hostConn, "waiting")
+	readUntilEvent(t, guestConn, "waiting")
+
+	ready := prepareRoulette(t, hostConn, guestConn)
+	started := startRouletteSpin(t, hostConn, guestConn, ready.RouletteSessionID)
+
+	reconnectConn := connectToRoom(t, baseURL, roomID)
+	defer reconnectConn.Close()
+	sendJSON(t, reconnectConn, `{"action":"join","user_id":"player2","name":"みな"}`)
+	readRawEvent(t, reconnectConn, "waiting")
+	readRawEvent(t, reconnectConn, "room_settings")
+	readySnapshot := readRawEvent(t, reconnectConn, "roulette_ready")
+	spinSnapshot := readRawEvent(t, reconnectConn, "roulette_spin_started")
+
+	if readySnapshot.RouletteSessionID != ready.RouletteSessionID || strings.Join(readySnapshot.RouletteOrder, ",") != strings.Join(ready.RouletteOrder, ",") {
+		t.Fatalf("roulette_ready snapshotが不正です: ready=%+v snapshot=%+v", ready, readySnapshot)
+	}
+	if spinSnapshot.RouletteSessionID != started.RouletteSessionID || spinSnapshot.SpinID != started.SpinID ||
+		strings.Join(spinSnapshot.RouletteOrder, ",") != strings.Join(started.RouletteOrder, ",") ||
+		spinSnapshot.StartsAt != started.StartsAt {
+		t.Fatalf("roulette_spin_started snapshotが不正です: started=%+v snapshot=%+v", started, spinSnapshot)
+	}
+}
+
+func TestRouletteStoppedSnapshotSentOnReconnect(t *testing.T) {
+	roomID := "rouletteStoppedReconnectRoom"
+	_, baseURL, cleanup := newTestServer(t, models.Room{
+		ID:        roomID,
+		Status:    0,
+		TimeLimit: 900,
+		OniCount:  1,
+	})
+	defer cleanup()
+
+	hostConn := connectToRoom(t, baseURL, roomID)
+	defer hostConn.Close()
+	guestConn := connectToRoom(t, baseURL, roomID)
+	defer guestConn.Close()
+
+	sendJSON(t, hostConn, `{"action":"join","user_id":"player1","name":"はるき"}`)
+	readUntilEvent(t, hostConn, "waiting")
+	sendJSON(t, guestConn, `{"action":"join","user_id":"player2","name":"みな"}`)
+	readUntilEvent(t, hostConn, "waiting")
+	readUntilEvent(t, guestConn, "waiting")
+
+	ready := prepareRoulette(t, hostConn, guestConn)
+	started := startRouletteSpin(t, hostConn, guestConn, ready.RouletteSessionID)
+	stopped := stopRouletteSpin(t, hostConn, guestConn, ready.RouletteSessionID, started.SpinID)
+
+	reconnectConn := connectToRoom(t, baseURL, roomID)
+	defer reconnectConn.Close()
+	sendJSON(t, reconnectConn, `{"action":"join","user_id":"player2","name":"みな"}`)
+	readRawEvent(t, reconnectConn, "waiting")
+	readRawEvent(t, reconnectConn, "room_settings")
+	readySnapshot := readRawEvent(t, reconnectConn, "roulette_ready")
+	stopSnapshot := readRawEvent(t, reconnectConn, "roulette_spin_stopped")
+
+	if readySnapshot.RouletteSessionID != ready.RouletteSessionID || strings.Join(readySnapshot.RouletteOrder, ",") != strings.Join(ready.RouletteOrder, ",") {
+		t.Fatalf("roulette_ready snapshotが不正です: ready=%+v snapshot=%+v", ready, readySnapshot)
+	}
+	if stopSnapshot.RouletteSessionID != stopped.RouletteSessionID || stopSnapshot.SpinID != stopped.SpinID ||
+		strings.Join(stopSnapshot.RouletteOrder, ",") != strings.Join(ready.RouletteOrder, ",") ||
+		strings.Join(stopSnapshot.SelectedOniUserIDs, ",") != strings.Join(stopped.SelectedOniUserIDs, ",") ||
+		stopSnapshot.StartsAt != started.StartsAt || stopSnapshot.StopAt != stopped.StopAt ||
+		stopSnapshot.DecelerationMS != rouletteDecelerationMS {
+		t.Fatalf("roulette_spin_stopped snapshotが不正です: stopped=%+v snapshot=%+v", stopped, stopSnapshot)
 	}
 }
 
@@ -1527,6 +1672,8 @@ func TestLeaveDeletesPlayerInWaiting(t *testing.T) {
 }
 
 func TestWaitingDisconnectDoesNotLeaveStalePlayerForResult(t *testing.T) {
+	setDisconnectGraceForTest(t, 30*time.Millisecond)
+
 	roomID := "waitingDisconnectStaleRoom"
 	db, baseURL, cleanup := newTestServer(t, models.Room{
 		ID:           roomID,
@@ -1568,7 +1715,14 @@ func TestWaitingDisconnectDoesNotLeaveStalePlayerForResult(t *testing.T) {
 		_, ok := findClient(room, "player3")
 		return !ok
 	})
-	assertDBPlayerExists(t, db, roomID, "player3", false)
+	assertDBPlayerExists(t, db, roomID, "player3", true)
+	waitFor(t, func() bool {
+		var count int64
+		if err := db.Model(&models.Player{}).Where("room_id = ? AND user_id = ?", roomID, "player3").Count(&count).Error; err != nil {
+			return false
+		}
+		return count == 0
+	})
 
 	sendJSON(t, oniConn, `{"action":"start","oni_users":["player1"]}`)
 	readUntilEvent(t, oniConn, "start")
@@ -1583,6 +1737,168 @@ func TestWaitingDisconnectDoesNotLeaveStalePlayerForResult(t *testing.T) {
 			t.Fatalf("waiting中に切断したplayerがsurvivorsに混ざっています: %+v", result.Survivors)
 		}
 	}
+}
+
+func TestWaitingDisconnectReconnectRestoresSamePlayerWithinGrace(t *testing.T) {
+	setDisconnectGraceForTest(t, 150*time.Millisecond)
+
+	roomID := "waitingReconnectGraceRoom"
+	db, baseURL, cleanup := newTestServer(t, models.Room{
+		ID:        roomID,
+		Status:    0,
+		TimeLimit: 900,
+	})
+	defer cleanup()
+
+	hostConn := connectToRoom(t, baseURL, roomID)
+	defer hostConn.Close()
+	guestConn := connectToRoom(t, baseURL, roomID)
+
+	sendJSON(t, hostConn, `{"action":"join","user_id":"player1","name":"はるき"}`)
+	readUntilEvent(t, hostConn, "waiting")
+	sendJSON(t, guestConn, `{"action":"join","user_id":"player2","name":"みな"}`)
+	readUntilEvent(t, hostConn, "waiting")
+	readUntilEvent(t, guestConn, "waiting")
+
+	if err := guestConn.Close(); err != nil {
+		t.Fatalf("切断失敗: %v", err)
+	}
+	room := GameHub.GetOrCreateRoom(roomID)
+	waitFor(t, func() bool {
+		_, ok := findClient(room, "player2")
+		return !ok
+	})
+	assertDBPlayerExists(t, db, roomID, "player2", true)
+
+	reconnectConn := connectToRoom(t, baseURL, roomID)
+	defer reconnectConn.Close()
+	sendJSON(t, reconnectConn, `{"action":"join","user_id":"player2","name":"みな"}`)
+	readRawEvent(t, reconnectConn, "waiting")
+	readRawEvent(t, reconnectConn, "room_settings")
+
+	time.Sleep(200 * time.Millisecond)
+	var count int64
+	if err := db.Model(&models.Player{}).Where("room_id = ? AND user_id = ?", roomID, "player2").Count(&count).Error; err != nil {
+		t.Fatalf("プレイヤー件数取得失敗: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("grace内reconnect後のDB player件数が不正です: got=%d want=1", count)
+	}
+	var player models.Player
+	if err := db.Where("room_id = ? AND user_id = ?", roomID, "player2").First(&player).Error; err != nil {
+		t.Fatalf("reconnect後のプレイヤー取得失敗: %v", err)
+	}
+	if player.ID != makePlayerID(roomID, "player2") {
+		t.Fatalf("reconnect後に同じplayer IDが維持されていません: %+v", player)
+	}
+}
+
+func TestHostDisconnectTransfersHostOnlyAfterGrace(t *testing.T) {
+	setDisconnectGraceForTest(t, 80*time.Millisecond)
+
+	roomID := "hostDisconnectGraceRoom"
+	db, baseURL, cleanup := newTestServer(t, models.Room{
+		ID:        roomID,
+		Status:    0,
+		TimeLimit: 900,
+	})
+	defer cleanup()
+
+	hostConn := connectToRoom(t, baseURL, roomID)
+	guestConn := connectToRoom(t, baseURL, roomID)
+	defer guestConn.Close()
+
+	sendJSON(t, hostConn, `{"action":"join","user_id":"player1","name":"はるき"}`)
+	readUntilEvent(t, hostConn, "waiting")
+	sendJSON(t, guestConn, `{"action":"join","user_id":"player2","name":"みな"}`)
+	readUntilEvent(t, hostConn, "waiting")
+	readUntilEvent(t, guestConn, "waiting")
+
+	if err := hostConn.Close(); err != nil {
+		t.Fatalf("切断失敗: %v", err)
+	}
+	room := GameHub.GetOrCreateRoom(roomID)
+	waitFor(t, func() bool {
+		_, ok := findClient(room, "player1")
+		return !ok
+	})
+
+	var savedRoom models.Room
+	if err := db.First(&savedRoom, "id = ?", roomID).Error; err != nil {
+		t.Fatalf("ルーム取得失敗: %v", err)
+	}
+	if savedRoom.HostUserID != "player1" || room.hostUserID() != "player1" {
+		t.Fatalf("grace中にhostが移譲されています: db=%s memory=%s", savedRoom.HostUserID, room.hostUserID())
+	}
+
+	waitFor(t, func() bool {
+		if err := db.First(&savedRoom, "id = ?", roomID).Error; err != nil {
+			return false
+		}
+		var count int64
+		if err := db.Model(&models.Player{}).Where("room_id = ? AND user_id = ?", roomID, "player1").Count(&count).Error; err != nil {
+			return false
+		}
+		return count == 0 && savedRoom.HostUserID == "player2" && room.hostUserID() == "player2"
+	})
+}
+
+func TestRouletteDisconnectDoesNotClearPendingImmediately(t *testing.T) {
+	setDisconnectGraceForTest(t, 200*time.Millisecond)
+
+	roomID := "rouletteDisconnectGraceRoom"
+	db, baseURL, cleanup := newTestServer(t, models.Room{
+		ID:           roomID,
+		Status:       0,
+		TimeLimit:    120,
+		OniCount:     1,
+		SyncInterval: 30,
+		GracePeriod:  0,
+	})
+	defer cleanup()
+
+	hostConn := connectToRoom(t, baseURL, roomID)
+	defer hostConn.Close()
+	guestConn := connectToRoom(t, baseURL, roomID)
+
+	sendJSON(t, hostConn, `{"action":"join","user_id":"player1","name":"はるき"}`)
+	readUntilEvent(t, hostConn, "waiting")
+	sendJSON(t, guestConn, `{"action":"join","user_id":"player2","name":"みな"}`)
+	readUntilEvent(t, hostConn, "waiting")
+	readUntilEvent(t, guestConn, "waiting")
+
+	ready := prepareRoulette(t, hostConn, guestConn)
+	started := startRouletteSpin(t, hostConn, guestConn, ready.RouletteSessionID)
+	stopped := stopRouletteSpin(t, hostConn, guestConn, ready.RouletteSessionID, started.SpinID)
+
+	if err := guestConn.Close(); err != nil {
+		t.Fatalf("切断失敗: %v", err)
+	}
+	room := GameHub.GetOrCreateRoom(roomID)
+	waitFor(t, func() bool {
+		_, ok := findClient(room, "player2")
+		return !ok
+	})
+	assertDBPlayerExists(t, db, roomID, "player2", true)
+	room.mu.RLock()
+	pending := copyStrings(room.Roulette.PendingOniUserIDs)
+	status := room.Roulette.Status
+	sessionID := room.Roulette.SessionID
+	spinID := room.Roulette.SpinID
+	stateText := fmt.Sprintf("%+v", room.Roulette)
+	room.mu.RUnlock()
+	if status != rouletteStatusStopped || sessionID != ready.RouletteSessionID || spinID != started.SpinID ||
+		strings.Join(pending, ",") != strings.Join(stopped.SelectedOniUserIDs, ",") {
+		t.Fatalf("非明示disconnectでroulette pendingが即clearされています: pending=%+v state=%s", pending, stateText)
+	}
+
+	reconnectConn := connectToRoom(t, baseURL, roomID)
+	sendJSON(t, reconnectConn, `{"action":"join","user_id":"player2","name":"みな"}`)
+	readRawEvent(t, reconnectConn, "waiting")
+	readRawEvent(t, reconnectConn, "room_settings")
+	readRawEvent(t, reconnectConn, "roulette_ready")
+	readRawEvent(t, reconnectConn, "roulette_spin_stopped")
+	sendJSON(t, reconnectConn, `{"action":"leave"}`)
 }
 
 func TestLeaveKeepsDBPlayerDuringActive(t *testing.T) {
