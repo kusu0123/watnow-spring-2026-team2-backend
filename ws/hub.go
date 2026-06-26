@@ -33,6 +33,7 @@ const (
 	minRoomPlayers         = 2
 	defaultMaxPlayers      = 6
 	maxRoomPlayers         = 15
+	defaultAreaSize        = "100"
 	minOniUsers            = 1
 	maxOniUsers            = 3
 	rouletteDecelerationMS = 2500
@@ -208,7 +209,7 @@ func (h *Hub) UpdateRoomSettings(roomID string, timeLimit, oniCount int, areaSiz
 	if room.MaxPlayers == 0 {
 		room.MaxPlayers = defaultMaxPlayers
 	}
-	room.AreaSize = areaSize
+	room.AreaSize = cleanAreaSize(areaSize)
 	room.SyncInterval = syncInterval
 	room.GracePeriod = gracePeriod
 }
@@ -226,7 +227,7 @@ func (h *Hub) UpdateRoomSettingsFromModel(room models.Room) *RoomState {
 	roomState.TimeLimit = timeLimit
 	roomState.OniCount = room.OniCount
 	roomState.MaxPlayers = cleanMaxPlayers(room.MaxPlayers)
-	roomState.AreaSize = room.AreaSize
+	roomState.AreaSize = cleanAreaSize(room.AreaSize)
 	roomState.SyncInterval = syncInterval
 	roomState.GracePeriod = gracePeriod
 	roomState.MissionEnabled = room.MissionEnabled
@@ -247,6 +248,7 @@ func (h *Hub) GetOrCreateRoom(roomID string) *RoomState {
 			Status:             0,
 			TimeLimit:          900,
 			MaxPlayers:         defaultMaxPlayers,
+			AreaSize:           defaultAreaSize,
 			GamePhase:          gamePhaseWaiting,
 			Clients:            make(map[*Client]bool),
 			pendingDisconnects: make(map[string]pendingDisconnect),

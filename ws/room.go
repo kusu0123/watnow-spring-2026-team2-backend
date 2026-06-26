@@ -32,6 +32,13 @@ func cleanMaxPlayers(maxPlayers int) int {
 	return maxPlayers
 }
 
+func cleanAreaSize(areaSize string) string {
+	if areaSize == "" {
+		return defaultAreaSize
+	}
+	return areaSize
+}
+
 func sendToClient(client *Client, msg interface{}) error {
 	client.mu.Lock()
 	defer client.mu.Unlock()
@@ -80,7 +87,7 @@ func (room *RoomState) RoomSettingsMessage() RoomSettingsMessage {
 		TimeLimit:      timeLimit,
 		OniCount:       room.OniCount,
 		MaxPlayers:     maxPlayers,
-		AreaSize:       room.AreaSize,
+		AreaSize:       cleanAreaSize(room.AreaSize),
 		SyncInterval:   syncInterval,
 		GracePeriod:    gracePeriod,
 		MissionEnabled: room.MissionEnabled,

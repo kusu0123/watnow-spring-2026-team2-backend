@@ -1,10 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -65,7 +67,7 @@ type roomSettingsInput struct {
 	TimeLimit      int              `json:"time_limit"`
 	OniCount       int              `json:"oni_count"`
 	MaxPlayers     *int             `json:"max_players"`
-	AreaSize       string           `json:"area_size"`
+	AreaSize       json.RawMessage  `json:"area_size"`
 	SyncInterval   int              `json:"sync_interval"`
 	GracePeriod    int              `json:"grace_period"`
 	MissionEnabled *bool            `json:"mission_enabled"`
@@ -76,6 +78,7 @@ const (
 	defaultMaxPlayers  = 6
 	minMaxPlayers      = 2
 	absoluteMaxPlayers = 15
+	defaultAreaSize    = "100"
 )
 
 func isAllowedInt(value int, allowedValues ...int) bool {
@@ -85,6 +88,29 @@ func isAllowedInt(value int, allowedValues ...int) bool {
 		}
 	}
 	return false
+}
+
+func normalizeAreaSize(raw json.RawMessage) (string, bool) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return "", false
+	}
+
+	var asInt int
+	if err := json.Unmarshal(raw, &asInt); err == nil {
+		value := strconv.Itoa(asInt)
+		return value, isAllowedAreaSize(value)
+	}
+
+	var asString string
+	if err := json.Unmarshal(raw, &asString); err != nil {
+		return "", false
+	}
+	value := strings.TrimSpace(asString)
+	return value, isAllowedAreaSize(value)
+}
+
+func isAllowedAreaSize(value string) bool {
+	return value == "50" || value == "100" || value == "300"
 }
 
 func setupRouter(db *gorm.DB) *gin.Engine {
@@ -112,6 +138,7 @@ func setupRouter(db *gorm.DB) *gin.Engine {
 				Status:     0,
 				TimeLimit:  900,
 				MaxPlayers: defaultMaxPlayers,
+				AreaSize:   defaultAreaSize,
 			}
 			err = db.Create(&room).Error
 			if err == nil {
@@ -203,8 +230,9 @@ func setupRouter(db *gorm.DB) *gin.Engine {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "猶予時間は1分、2分、3分から選んでください"})
 			return
 		}
-		if len(input.AreaSize) > 50 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "エリアの文字数が長すぎます"})
+		areaSize, ok := normalizeAreaSize(input.AreaSize)
+		if !ok {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "マップ範囲は50m、100m、300mから選んでください"})
 			return
 		}
 		if input.AreaCenter != nil {
@@ -219,7 +247,7 @@ func setupRouter(db *gorm.DB) *gin.Engine {
 			"time_limit":    input.TimeLimit,
 			"oni_count":     input.OniCount,
 			"max_players":   maxPlayers,
-			"area_size":     input.AreaSize,
+			"area_size":     areaSize,
 			"sync_interval": input.SyncInterval,
 			"grace_period":  input.GracePeriod,
 		}
