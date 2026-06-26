@@ -40,6 +40,14 @@ const (
 	rouletteStatusSpinning = "spinning"
 	rouletteStatusStopped  = "stopped"
 	defaultDisconnectGrace = 45 * time.Second
+	gamePhaseWaiting       = "waiting"
+	gamePhaseGrace         = "grace"
+	gamePhaseActive        = "active"
+	gamePhaseResult        = "result"
+	endReasonTimeUp        = "time_up"
+	endReasonAllCaught     = "all_runners_caught"
+	winnerRunners          = "runners"
+	winnerOni              = "oni"
 )
 
 var disconnectGraceNanos atomic.Int64
@@ -99,6 +107,13 @@ type RoomState struct {
 	HostUserID         string
 	StartAt            time.Time
 	ActiveAt           time.Time
+	GameID             string
+	GameStartedAt      time.Time
+	GraceEndsAt        time.Time
+	GameEndsAt         time.Time
+	GamePhase          string
+	Winner             string
+	EndReason          string
 	IsGameActive       bool
 	Clients            map[*Client]bool
 	IsGMLoopActive     bool // 追加：GMの重複起動防止
@@ -232,6 +247,7 @@ func (h *Hub) GetOrCreateRoom(roomID string) *RoomState {
 			Status:             0,
 			TimeLimit:          900,
 			MaxPlayers:         defaultMaxPlayers,
+			GamePhase:          gamePhaseWaiting,
 			Clients:            make(map[*Client]bool),
 			pendingDisconnects: make(map[string]pendingDisconnect),
 		}
@@ -652,21 +668,26 @@ func sendRoomSettingsToClient(roomID string, client *Client, room *RoomState, us
 func startGameLoopIfNeeded(roomID string, room *RoomState, db *gorm.DB) {
 	startLoop := false
 	var loopID uint64
+	var gameID string
 	room.mu.Lock()
-	if room.Status == 1 && !room.IsGMLoopActive {
+	if room.Status == 1 && room.GameID != "" && !room.IsGMLoopActive {
 		room.LoopID++
 		loopID = room.LoopID
+		gameID = room.GameID
 		room.IsGMLoopActive = true
 		startLoop = true
 	}
 	room.mu.Unlock()
 
 	if startLoop {
-		go runGameLoop(roomID, room, db, loopID)
+		go runGameLoop(roomID, room, db, loopID, gameID)
 	}
 }
 
 func sendActiveStateToClient(roomID string, client *Client, room *RoomState, db *gorm.DB) {
+	now := time.Now()
+	room.activateIfGraceElapsed(now)
+
 	oniUsers, err := oniUsersForRoom(db, roomID)
 	if err != nil {
 		log.Printf("[Error] Room: %s | 鬼一覧の取得に失敗しました: %v\n", roomID, err)
@@ -683,18 +704,18 @@ func sendActiveStateToClient(roomID string, client *Client, room *RoomState, db 
 	isGameActive := room.IsGameActive
 	room.mu.RUnlock()
 
-	if err := sendToClient(client, OutgoingMessage{
+	if err := sendToClient(client, room.addTimerSnapshot(OutgoingMessage{
 		Event:     "start",
 		Role:      &role,
 		TimeLimit: timeLimit,
 		OniUsers:  oniUsers,
-	}); err != nil {
+	}, now)); err != nil {
 		log.Printf("[Info] Room: %s | User: %s | start再送に失敗しました: %v\n", roomID, userID, err)
 		return
 	}
 
 	if isGameActive {
-		if err := sendToClient(client, OutgoingMessage{Event: "game_active"}); err != nil {
+		if err := sendToClient(client, room.addTimerSnapshot(OutgoingMessage{Event: "game_active"}, time.Now())); err != nil {
 			log.Printf("[Info] Room: %s | User: %s | game_active再送に失敗しました: %v\n", roomID, userID, err)
 			return
 		}
@@ -881,6 +902,7 @@ func (h *Hub) cleanupEmptyRoom(roomID string, db *gorm.DB) {
 		r.Status = 2
 		r.IsGameActive = false
 		r.IsGMLoopActive = false
+		r.GamePhase = gamePhaseResult
 		r.LoopID++
 	}
 	r.mu.Unlock()
@@ -1169,6 +1191,13 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 			client.PhotoURL = player.PhotoURL
 			client.CapturedAt = player.CapturedAt
 			client.mu.Unlock()
+
+			if status == 1 {
+				now := time.Now()
+				room.activateIfGraceElapsed(now)
+				room.finishIfExpired(roomID, db, now)
+				status = roomStatus(room)
+			}
 
 			GameHub.Register(roomID, client)
 
@@ -1564,13 +1593,24 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 			}
 
 			room.TimeLimit, room.SyncInterval, room.GracePeriod = cleanGameSettings(room.TimeLimit, room.SyncInterval, room.GracePeriod)
+			gameStartedAt := time.Now()
+			graceEndsAt := gameStartedAt.Add(time.Duration(room.GracePeriod) * time.Second)
+			gameEndsAt := graceEndsAt.Add(time.Duration(room.TimeLimit) * time.Second)
 			room.Status = 1
 			room.IsGMLoopActive = true
 			room.IsGameActive = false
-			room.StartAt = time.Now().Add(time.Duration(room.GracePeriod) * time.Second)
+			room.GameID = uuid.New().String()
+			room.GameStartedAt = gameStartedAt
+			room.GraceEndsAt = graceEndsAt
+			room.GameEndsAt = gameEndsAt
+			room.GamePhase = gamePhaseGrace
+			room.Winner = ""
+			room.EndReason = ""
+			room.StartAt = graceEndsAt
 			room.ActiveAt = time.Time{}
 			room.LoopID++
 			loopID := room.LoopID
+			gameID := room.GameID
 
 			type playerStartState struct {
 				UserID string
@@ -1626,6 +1666,13 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 					room.Status = 0
 					room.IsGMLoopActive = false
 					room.IsGameActive = false
+					room.GameID = ""
+					room.GameStartedAt = time.Time{}
+					room.GraceEndsAt = time.Time{}
+					room.GameEndsAt = time.Time{}
+					room.GamePhase = gamePhaseWaiting
+					room.Winner = ""
+					room.EndReason = ""
 					room.StartAt = time.Time{}
 					room.ActiveAt = time.Time{}
 					room.LoopID++
@@ -1668,17 +1715,17 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 			for c := range room.Clients {
 				c.mu.Lock()
 				role := c.Role
-				_ = c.Conn.WriteJSON(OutgoingMessage{
+				_ = c.Conn.WriteJSON(room.addTimerSnapshot(OutgoingMessage{
 					Event:     "start",
 					Role:      &role,
 					TimeLimit: room.TimeLimit,
 					OniUsers:  selectedOniUsers,
-				})
+				}, time.Now()))
 				c.mu.Unlock()
 			}
 			room.mu.RUnlock()
 
-			go runGameLoop(roomID, room, db, loopID)
+			go runGameLoop(roomID, room, db, loopID, gameID)
 
 		case "reset":
 			client.mu.Lock()
@@ -1707,6 +1754,13 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 			room.Status = 0
 			room.IsGameActive = false
 			room.IsGMLoopActive = false
+			room.GameID = ""
+			room.GameStartedAt = time.Time{}
+			room.GraceEndsAt = time.Time{}
+			room.GameEndsAt = time.Time{}
+			room.GamePhase = gamePhaseWaiting
+			room.Winner = ""
+			room.EndReason = ""
 			room.StartAt = time.Time{}
 			room.ActiveAt = time.Time{}
 			room.LoopID++
@@ -2067,7 +2121,7 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 						allCaught = room.allConnectedRunnersCaught()
 					}
 					if allCaught {
-						room.finish(roomID, db)
+						room.finish(roomID, db, endReasonAllCaught)
 					}
 				}
 			} else {

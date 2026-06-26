@@ -51,6 +51,15 @@ type OutgoingMessage struct {
 	Locations          []LocationVal      `json:"locations,omitempty"`
 	Survivors          []string           `json:"survivors,omitempty"`
 	Results            []ResultVal        `json:"results,omitempty"`
+	ServerNow          string             `json:"server_now,omitempty"`
+	GameID             string             `json:"game_id,omitempty"`
+	GameStartedAt      string             `json:"game_started_at,omitempty"`
+	GraceEndsAt        string             `json:"grace_ends_at,omitempty"`
+	GameEndsAt         string             `json:"game_ends_at,omitempty"`
+	GamePhase          string             `json:"game_phase,omitempty"`
+	RemainingSeconds   *int               `json:"remaining_seconds,omitempty"`
+	Winner             string             `json:"winner,omitempty"`
+	EndReason          string             `json:"end_reason,omitempty"`
 }
 
 type RoomSettingsMessage struct {
