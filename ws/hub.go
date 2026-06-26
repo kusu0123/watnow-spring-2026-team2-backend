@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -38,7 +39,18 @@ const (
 	rouletteStatusReady    = "ready"
 	rouletteStatusSpinning = "spinning"
 	rouletteStatusStopped  = "stopped"
+	defaultDisconnectGrace = 45 * time.Second
 )
+
+var disconnectGraceNanos atomic.Int64
+
+func init() {
+	disconnectGraceNanos.Store(int64(defaultDisconnectGrace))
+}
+
+func disconnectGraceWindow() time.Duration {
+	return time.Duration(disconnectGraceNanos.Load())
+}
 
 type Client struct {
 	Conn           *websocket.Conn
@@ -68,27 +80,33 @@ type RouletteState struct {
 	StoppedAt         *time.Time
 }
 
+type pendingDisconnect struct {
+	Seq int64
+}
+
 type RoomState struct {
-	Status         int
-	TimeLimit      int
-	OniCount       int // 追加
-	MaxPlayers     int
-	AreaSize       string
-	SyncInterval   int // 追加
-	GracePeriod    int // 追加
-	MissionEnabled bool
-	AreaCenterLat  float64
-	AreaCenterLng  float64
-	HasAreaCenter  bool
-	HostUserID     string
-	StartAt        time.Time
-	ActiveAt       time.Time
-	IsGameActive   bool
-	Clients        map[*Client]bool
-	IsGMLoopActive bool // 追加：GMの重複起動防止
-	LoopID         uint64
-	Roulette       RouletteState
-	mu             sync.RWMutex
+	Status             int
+	TimeLimit          int
+	OniCount           int // 追加
+	MaxPlayers         int
+	AreaSize           string
+	SyncInterval       int // 追加
+	GracePeriod        int // 追加
+	MissionEnabled     bool
+	AreaCenterLat      float64
+	AreaCenterLng      float64
+	HasAreaCenter      bool
+	HostUserID         string
+	StartAt            time.Time
+	ActiveAt           time.Time
+	IsGameActive       bool
+	Clients            map[*Client]bool
+	IsGMLoopActive     bool // 追加：GMの重複起動防止
+	LoopID             uint64
+	Roulette           RouletteState
+	disconnectSeq      int64
+	pendingDisconnects map[string]pendingDisconnect
+	mu                 sync.RWMutex
 }
 
 type Hub struct {
@@ -211,10 +229,11 @@ func (h *Hub) GetOrCreateRoom(roomID string) *RoomState {
 	room, ok := h.Rooms[roomID]
 	if !ok {
 		room = &RoomState{
-			Status:     0,
-			TimeLimit:  900,
-			MaxPlayers: defaultMaxPlayers,
-			Clients:    make(map[*Client]bool),
+			Status:             0,
+			TimeLimit:          900,
+			MaxPlayers:         defaultMaxPlayers,
+			Clients:            make(map[*Client]bool),
+			pendingDisconnects: make(map[string]pendingDisconnect),
 		}
 		h.Rooms[roomID] = room
 	}
@@ -235,6 +254,10 @@ func (h *Hub) Register(roomID string, client *Client) {
 	client.mu.Unlock()
 
 	room.mu.Lock()
+	if room.pendingDisconnects == nil {
+		room.pendingDisconnects = make(map[string]pendingDisconnect)
+	}
+	delete(room.pendingDisconnects, userID)
 	for oldClient := range room.Clients {
 		if oldClient == client {
 			continue
@@ -439,14 +462,20 @@ func rouletteSpinStartedMessage(sessionID string, spinID int, order []string, st
 	}
 }
 
-func rouletteSpinStoppedMessage(sessionID string, spinID int, selectedOniUserIDs []string, stopAt time.Time) OutgoingMessage {
+func rouletteSpinStoppedMessage(sessionID string, spinID int, order []string, selectedOniUserIDs []string, startsAt, stopAt time.Time) OutgoingMessage {
 	if stopAt.IsZero() {
 		stopAt = time.Now().UTC()
+	}
+	startsAtText := ""
+	if !startsAt.IsZero() {
+		startsAtText = startsAt.UTC().Format(time.RFC3339Nano)
 	}
 	return OutgoingMessage{
 		Event:              "roulette_spin_stopped",
 		RouletteSessionID:  sessionID,
 		SpinID:             spinID,
+		RouletteOrder:      copyStrings(order),
+		StartsAt:           startsAtText,
 		SelectedOniUserIDs: copyStrings(selectedOniUserIDs),
 		StopAt:             stopAt.UTC().Format(time.RFC3339Nano),
 		DecelerationMS:     rouletteDecelerationMS,
@@ -457,6 +486,50 @@ func rouletteResetMessage(sessionID string) OutgoingMessage {
 	return OutgoingMessage{
 		Event:             "roulette_reset",
 		RouletteSessionID: sessionID,
+	}
+}
+
+func rouletteSnapshotMessagesLocked(room *RoomState) []OutgoingMessage {
+	if room.Roulette.SessionID == "" {
+		return nil
+	}
+
+	sessionID := room.Roulette.SessionID
+	spinID := room.Roulette.SpinID
+	order := copyStrings(room.Roulette.RouletteOrder)
+	selectedOniUserIDs := copyStrings(room.Roulette.PendingOniUserIDs)
+	startedAt := time.Time{}
+	if room.Roulette.StartedAt != nil {
+		startedAt = *room.Roulette.StartedAt
+	}
+	stoppedAt := time.Time{}
+	if room.Roulette.StoppedAt != nil {
+		stoppedAt = *room.Roulette.StoppedAt
+	}
+
+	messages := []OutgoingMessage{rouletteReadyMessage(sessionID, order)}
+	switch room.Roulette.Status {
+	case rouletteStatusReady:
+		return messages
+	case rouletteStatusSpinning:
+		return append(messages, rouletteSpinStartedMessage(sessionID, spinID, order, startedAt))
+	case rouletteStatusStopped:
+		return append(messages, rouletteSpinStoppedMessage(sessionID, spinID, order, selectedOniUserIDs, startedAt, stoppedAt))
+	default:
+		return nil
+	}
+}
+
+func sendRouletteSnapshotToClient(roomID string, client *Client, room *RoomState, userID string) {
+	room.mu.RLock()
+	messages := rouletteSnapshotMessagesLocked(room)
+	room.mu.RUnlock()
+
+	for _, msg := range messages {
+		if err := sendToClient(client, msg); err != nil {
+			log.Printf("[Info] Room: %s | User: %s | roulette snapshot送信に失敗しました: %v\n", roomID, userID, err)
+			return
+		}
 	}
 }
 
@@ -679,14 +752,173 @@ func resetRoomForReplay(roomID string, room *RoomState, db *gorm.DB) (map[string
 	})
 }
 
-func (h *Hub) Unregister(roomID string, client *Client, db *gorm.DB) {
-	h.mu.Lock()
-	room, ok := h.Rooms[roomID]
-	h.mu.Unlock()
+func hasActiveClientForUserLocked(room *RoomState, userID string, excluded *Client) bool {
+	for c := range room.Clients {
+		if c == excluded {
+			continue
+		}
+		c.mu.Lock()
+		sameUser := c.UserID == userID
+		c.mu.Unlock()
+		if sameUser {
+			return true
+		}
+	}
+	return false
+}
 
+func (room *RoomState) markPendingDisconnectLocked(userID string) int64 {
+	if room.pendingDisconnects == nil {
+		room.pendingDisconnects = make(map[string]pendingDisconnect)
+	}
+	room.disconnectSeq++
+	seq := room.disconnectSeq
+	room.pendingDisconnects[userID] = pendingDisconnect{Seq: seq}
+	return seq
+}
+
+func (h *Hub) schedulePendingDisconnectCleanup(roomID, userID string, seq int64, db *gorm.DB) {
+	grace := disconnectGraceWindow()
+	go func() {
+		if grace > 0 {
+			time.Sleep(grace)
+		}
+		h.cleanupPendingDisconnect(roomID, userID, seq, db)
+	}()
+}
+
+func (h *Hub) cleanupPendingDisconnect(roomID, userID string, seq int64, db *gorm.DB) {
+	h.mu.RLock()
+	room, ok := h.Rooms[roomID]
+	h.mu.RUnlock()
 	if !ok {
 		return
 	}
+
+	var status int
+	var shouldBroadcast bool
+	var shouldCleanupEmptyRoom bool
+
+	room.mu.Lock()
+	if room.pendingDisconnects == nil {
+		room.mu.Unlock()
+		return
+	}
+	pending, ok := room.pendingDisconnects[userID]
+	if !ok || pending.Seq != seq {
+		room.mu.Unlock()
+		return
+	}
+	if hasActiveClientForUserLocked(room, userID, nil) {
+		delete(room.pendingDisconnects, userID)
+		room.mu.Unlock()
+		return
+	}
+
+	status = room.Status
+	switch status {
+	case 0, 2:
+		if db == nil {
+			delete(room.pendingDisconnects, userID)
+			shouldCleanupEmptyRoom = len(room.Clients) == 0 && len(room.pendingDisconnects) == 0
+			room.mu.Unlock()
+			if shouldCleanupEmptyRoom {
+				h.cleanupEmptyRoom(roomID, db)
+			}
+			return
+		}
+
+		if err := db.Where("room_id = ? AND user_id = ?", roomID, userID).Delete(&models.Player{}).Error; err != nil {
+			room.mu.Unlock()
+			log.Printf("[Error] Room: %s | User: %s | grace後のプレイヤー削除に失敗しました: %v\n", roomID, userID, err)
+			return
+		}
+		newHostUserID, err := transferRoomHostIfNeeded(db, roomID, userID)
+		if err != nil {
+			room.mu.Unlock()
+			log.Printf("[Error] Room: %s | User: %s | grace後のhost移譲に失敗しました: %v\n", roomID, userID, err)
+			return
+		}
+		room.HostUserID = newHostUserID
+		if status == 0 {
+			clearPendingRouletteLocked(room)
+		}
+		delete(room.pendingDisconnects, userID)
+		shouldBroadcast = len(room.Clients) > 0
+		shouldCleanupEmptyRoom = len(room.Clients) == 0 && len(room.pendingDisconnects) == 0
+		room.mu.Unlock()
+	default:
+		delete(room.pendingDisconnects, userID)
+		shouldCleanupEmptyRoom = len(room.Clients) == 0 && len(room.pendingDisconnects) == 0
+		room.mu.Unlock()
+	}
+
+	if shouldBroadcast {
+		if status == 0 {
+			room.Broadcast(room.waitingMessage())
+		} else if status == 2 {
+			room.Broadcast(room.resultMessageBestEffort(roomID, db))
+		}
+	}
+	if shouldCleanupEmptyRoom {
+		h.cleanupEmptyRoom(roomID, db)
+	}
+}
+
+func (h *Hub) cleanupEmptyRoom(roomID string, db *gorm.DB) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	r, exists := h.Rooms[roomID]
+	if !exists {
+		return
+	}
+
+	r.mu.Lock()
+	stillEmpty := len(r.Clients) == 0 && len(r.pendingDisconnects) == 0
+	shouldFinishRoom := stillEmpty && r.Status == 1
+	if shouldFinishRoom {
+		r.Status = 2
+		r.IsGameActive = false
+		r.IsGMLoopActive = false
+		r.LoopID++
+	}
+	r.mu.Unlock()
+
+	if !stillEmpty {
+		return
+	}
+
+	if shouldFinishRoom && db != nil {
+		if err := db.Model(&models.Room{}).Where("id = ?", roomID).Update("status", 2).Error; err != nil {
+			log.Printf("[Error] Room: %s | 空部屋の終了状態保存に失敗しました: %v\n", roomID, err)
+			return
+		}
+		if err := db.Model(&models.CaptureRequest{}).Where("room_id = ? AND status = ?", roomID, "pending").Update("status", "canceled").Error; err != nil {
+			log.Printf("[Error] Room: %s | 空部屋の未解決キャプチャキャンセルに失敗しました: %v\n", roomID, err)
+		}
+	}
+	delete(h.Rooms, roomID)
+	log.Printf("[Info] Room: %s | メモリから削除されました（退出完了）\n", roomID)
+}
+
+func (h *Hub) Unregister(roomID string, client *Client, db *gorm.DB) {
+	h.mu.RLock()
+	room, ok := h.Rooms[roomID]
+	h.mu.RUnlock()
+	if !ok {
+		return
+	}
+
+	client.mu.Lock()
+	leftExplicitly := client.LeftExplicitly
+	userID := client.UserID
+	client.mu.Unlock()
+
+	var status int
+	var shouldScheduleCleanup bool
+	var pendingSeq int64
+	var shouldCleanupEmptyRoom bool
 
 	room.mu.Lock()
 	if _, ok := room.Clients[client]; ok {
@@ -695,92 +927,27 @@ func (h *Hub) Unregister(roomID string, client *Client, db *gorm.DB) {
 		_ = client.Conn.Close()
 		client.mu.Unlock()
 	}
-	//部屋に誰もいなくなったかチェック
-	isEmpty := len(room.Clients) == 0
-	status := room.Status
+	status = room.Status
+	hasActiveConnection := userID != "" && hasActiveClientForUserLocked(room, userID, client)
+	if !leftExplicitly && userID != "" && !hasActiveConnection && db != nil {
+		pendingSeq = room.markPendingDisconnectLocked(userID)
+		shouldScheduleCleanup = true
+	} else {
+		shouldCleanupEmptyRoom = len(room.Clients) == 0 && len(room.pendingDisconnects) == 0
+	}
 	room.mu.Unlock()
 
-	client.mu.Lock()
-	leftExplicitly := client.LeftExplicitly
-	userID := client.UserID
-	client.mu.Unlock()
-
-	hasActiveConnection := false
-	if userID != "" {
-		room.mu.Lock()
-		for c := range room.Clients {
-			if c != client {
-				c.mu.Lock()
-				sameUser := c.UserID == userID
-				c.mu.Unlock()
-				if sameUser {
-					hasActiveConnection = true
-					break
-				}
-			}
-		}
-		room.mu.Unlock()
-	}
-
-	if !hasActiveConnection && !leftExplicitly && (status == 0 || status == 2) && userID != "" && db != nil {
-		if err := db.Where("room_id = ? AND user_id = ?", roomID, userID).Delete(&models.Player{}).Error; err != nil {
-			log.Printf("[Error] Room: %s | User: %s | waiting切断後のプレイヤー削除に失敗しました: %v\n", roomID, userID, err)
-		} else {
-			newHostUserID, err := transferRoomHostIfNeeded(db, roomID, userID)
-			if err != nil {
-				log.Printf("[Error] Room: %s | User: %s | waiting切断後のhost移譲に失敗しました: %v\n", roomID, userID, err)
-			} else {
-				syncRoomHost(room, newHostUserID)
-			}
-			room.mu.Lock()
-			clearPendingRouletteLocked(room)
-			room.mu.Unlock()
-			if !isEmpty {
-				if status == 0 {
-					room.Broadcast(room.waitingMessage())
-				} else if status == 2 {
-					room.Broadcast(room.resultMessageBestEffort(roomID, db))
-				}
-			}
-		}
+	if shouldScheduleCleanup {
+		h.schedulePendingDisconnectCleanup(roomID, userID, pendingSeq, db)
+		return
 	}
 
 	if leftExplicitly && status == 1 {
 		return
 	}
 
-	//誰もいなければ、Hub(メモリ)から部屋ごと削除する
-	if isEmpty {
-		h.mu.Lock()
-		// ロックを取ってからもう一度確認（処理中に別の人とすれ違いで入室してきたら消さないようにする安全対策）
-		if r, exists := h.Rooms[roomID]; exists {
-			r.mu.Lock()
-			stillEmpty := len(r.Clients) == 0
-			shouldFinishRoom := stillEmpty && r.Status == 1
-			if shouldFinishRoom {
-				r.Status = 2
-				r.IsGameActive = false
-				r.IsGMLoopActive = false
-				r.LoopID++
-			}
-			r.mu.Unlock()
-
-			if stillEmpty {
-				if shouldFinishRoom && db != nil {
-					if err := db.Model(&models.Room{}).Where("id = ?", roomID).Update("status", 2).Error; err != nil {
-						log.Printf("[Error] Room: %s | 空部屋の終了状態保存に失敗しました: %v\n", roomID, err)
-						h.mu.Unlock()
-						return
-					}
-					if err := db.Model(&models.CaptureRequest{}).Where("room_id = ? AND status = ?", roomID, "pending").Update("status", "canceled").Error; err != nil {
-						log.Printf("[Error] Room: %s | 空部屋の未解決キャプチャキャンセルに失敗しました: %v\n", roomID, err)
-					}
-				}
-				delete(h.Rooms, roomID)
-				log.Printf("[Info] Room: %s | メモリから削除されました（退出完了）\n", roomID)
-			}
-		}
-		h.mu.Unlock()
+	if shouldCleanupEmptyRoom {
+		h.cleanupEmptyRoom(roomID, db)
 	}
 }
 
@@ -1015,6 +1182,7 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				syncRoomHost(room, hostUserID)
 				room.Broadcast(room.waitingMessage())
 				sendRoomSettingsToClient(roomID, client, room, player.UserID)
+				sendRouletteSnapshotToClient(roomID, client, room, player.UserID)
 			case 1:
 				sendRoomSettingsToClient(roomID, client, room, player.UserID)
 				sendActiveStateToClient(roomID, client, room, db)
@@ -1254,7 +1422,11 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 			room.Roulette.Status = rouletteStatusStopped
 			room.Roulette.PendingOniUserIDs = copyStrings(selectedOniUserIDs)
 			room.Roulette.StoppedAt = timePtr(stoppedAt)
-			rouletteMessage := rouletteSpinStoppedMessage(room.Roulette.SessionID, room.Roulette.SpinID, selectedOniUserIDs, stoppedAt)
+			startedAt := time.Time{}
+			if room.Roulette.StartedAt != nil {
+				startedAt = *room.Roulette.StartedAt
+			}
+			rouletteMessage := rouletteSpinStoppedMessage(room.Roulette.SessionID, room.Roulette.SpinID, room.Roulette.RouletteOrder, selectedOniUserIDs, startedAt, stoppedAt)
 			room.mu.Unlock()
 
 			room.Broadcast(rouletteMessage)
@@ -1308,6 +1480,12 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				continue
 			}
 
+			var roomPlayers []models.Player
+			if err := db.Where("room_id = ?", roomID).Order("user_id ASC").Find(&roomPlayers).Error; err != nil {
+				sendError(client, "プレイヤー情報の取得に失敗しました")
+				continue
+			}
+
 			room.mu.Lock()
 			if room.Status != 0 || room.IsGMLoopActive {
 				room.mu.Unlock()
@@ -1352,13 +1530,11 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 				continue
 			}
 
-			joinedUsers := make(map[string]bool, len(room.Clients))
-			for c := range room.Clients {
-				c.mu.Lock()
-				if c.UserID != "" {
-					joinedUsers[c.UserID] = true
+			joinedUsers := make(map[string]bool, len(roomPlayers))
+			for _, player := range roomPlayers {
+				if player.UserID != "" {
+					joinedUsers[player.UserID] = true
 				}
-				c.mu.Unlock()
 			}
 			playerCount := len(joinedUsers)
 			if playerCount < minStartPlayers {
@@ -1397,30 +1573,45 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 			loopID := room.LoopID
 
 			type playerStartState struct {
+				UserID string
+				Role   int
+			}
+			type connectedStartState struct {
 				Client        *Client
-				UserID        string
-				Role          int
-				Color         string
 				PreviousRole  int
 				PreviousColor string
 			}
 
 			var playerStates []playerStartState
+			rolesByUser := make(map[string]int, len(roomPlayers))
+			for _, player := range roomPlayers {
+				if player.UserID == "" {
+					continue
+				}
+				role := 0
+				if oniUsers[player.UserID] {
+					role = 1
+				}
+				rolesByUser[player.UserID] = role
+				playerStates = append(playerStates, playerStartState{
+					UserID: player.UserID,
+					Role:   role,
+				})
+			}
+
+			var connectedStates []connectedStartState
 			for c := range room.Clients {
 				c.mu.Lock()
-				if c.UserID != "" {
+				role, ok := rolesByUser[c.UserID]
+				if c.UserID != "" && ok {
 					previousRole := c.Role
 					previousColor := c.Color
-					c.Role = 0
-					if oniUsers[c.UserID] {
-						c.Role = 1
+					c.Role = role
+					if role == 1 {
 						c.Color = "black"
 					}
-					playerStates = append(playerStates, playerStartState{
+					connectedStates = append(connectedStates, connectedStartState{
 						Client:        c,
-						UserID:        c.UserID,
-						Role:          c.Role,
-						Color:         c.Color,
 						PreviousRole:  previousRole,
 						PreviousColor: previousColor,
 					})
@@ -1439,7 +1630,7 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 					room.ActiveAt = time.Time{}
 					room.LoopID++
 				}
-				for _, state := range playerStates {
+				for _, state := range connectedStates {
 					state.Client.mu.Lock()
 					state.Client.Role = state.PreviousRole
 					state.Client.Color = state.PreviousColor

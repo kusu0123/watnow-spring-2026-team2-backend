@@ -238,6 +238,7 @@ func TestPutRoomSettingsBroadcastsAndSavesAreaCenter(t *testing.T) {
 	joinHTTPTestClient(t, wsConn2, "player2", "みな")
 
 	putRoomSettings(t, server, roomID, `{
+		"user_id": "player1",
 		"time_limit": 900,
 		"oni_count": 1,
 		"max_players": 8,
@@ -294,6 +295,71 @@ func TestPutRoomSettingsBroadcastsAndSavesAreaCenter(t *testing.T) {
 	}, 900, 1, "500m", 180, 120, 34.0, 135.0)
 }
 
+func TestPutRoomSettingsRejectsNonHostOrMissingUserID(t *testing.T) {
+	roomID := "putSettingsAuthRoom"
+	db, server, _, cleanup := newHTTPTestServer(t, models.Room{
+		ID:           roomID,
+		Status:       0,
+		TimeLimit:    900,
+		OniCount:     1,
+		MaxPlayers:   6,
+		AreaSize:     "300m",
+		SyncInterval: 60,
+		GracePeriod:  60,
+		HostUserID:   "player1",
+	})
+	defer cleanup()
+
+	for _, player := range []models.Player{
+		{ID: roomID + ":player1", RoomID: roomID, UserID: "player1", Name: "はるき"},
+		{ID: roomID + ":player2", RoomID: roomID, UserID: "player2", Name: "みな"},
+	} {
+		if err := db.Create(&player).Error; err != nil {
+			t.Fatalf("テストプレイヤー作成失敗: %v", err)
+		}
+	}
+
+	validSettings := `"time_limit":900,"oni_count":1,"max_players":6,"area_size":"300m","sync_interval":60,"grace_period":60`
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "missingUserID",
+			body: `{` + validSettings + `}`,
+		},
+		{
+			name: "guestUserID",
+			body: `{"user_id":"player2",` + validSettings + `}`,
+		},
+		{
+			name: "unknownUserID",
+			body: `{"user_id":"ghost",` + validSettings + `}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := putRoomSettingsRaw(t, server, roomID, tt.body)
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusForbidden {
+				payload, _ := io.ReadAll(resp.Body)
+				t.Fatalf("host以外の設定更新が拒否されていません: status=%d body=%s", resp.StatusCode, payload)
+			}
+		})
+	}
+
+	if err := db.Model(&models.Room{}).Where("id = ?", roomID).Update("host_user_id", "ghost").Error; err != nil {
+		t.Fatalf("host_user_id更新失敗: %v", err)
+	}
+	resp := putRoomSettingsRaw(t, server, roomID, `{"user_id":"ghost",`+validSettings+`}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		payload, _ := io.ReadAll(resp.Body)
+		t.Fatalf("存在しないhost user_idが拒否されていません: status=%d body=%s", resp.StatusCode, payload)
+	}
+}
+
 func TestPutRoomSettingsWithoutAreaCenterPreservesExistingCenter(t *testing.T) {
 	roomID := "preserveCenterRoom"
 	db, server, wsBaseURL, cleanup := newHTTPTestServer(t, models.Room{
@@ -316,6 +382,7 @@ func TestPutRoomSettingsWithoutAreaCenterPreservesExistingCenter(t *testing.T) {
 	assertHTTPTestRoomSettings(t, joinSettings, 900, 1, "500m", 180, 120, 34.0, 135.0)
 
 	putRoomSettings(t, server, roomID, `{
+		"user_id": "player1",
 		"time_limit": 600,
 		"oni_count": 2,
 		"area_size": "700m",
@@ -342,7 +409,7 @@ func TestPutRoomSettingsWithoutAreaCenterPreservesExistingCenter(t *testing.T) {
 
 func TestPutRoomSettingsRejectsInvalidStep3Values(t *testing.T) {
 	roomID := "invalidSettingsRoom"
-	_, server, _, cleanup := newHTTPTestServer(t, models.Room{
+	db, server, _, cleanup := newHTTPTestServer(t, models.Room{
 		ID:           roomID,
 		Status:       0,
 		TimeLimit:    900,
@@ -350,8 +417,17 @@ func TestPutRoomSettingsRejectsInvalidStep3Values(t *testing.T) {
 		AreaSize:     "500m",
 		SyncInterval: 180,
 		GracePeriod:  120,
+		HostUserID:   "player1",
 	})
 	defer cleanup()
+	if err := db.Create(&models.Player{
+		ID:     roomID + ":player1",
+		RoomID: roomID,
+		UserID: "player1",
+		Name:   "はるき",
+	}).Error; err != nil {
+		t.Fatalf("host player作成失敗: %v", err)
+	}
 
 	tests := []struct {
 		name string
@@ -359,39 +435,39 @@ func TestPutRoomSettingsRejectsInvalidStep3Values(t *testing.T) {
 	}{
 		{
 			name: "oniCountZero",
-			body: `{"time_limit":900,"oni_count":0,"area_size":"500m","sync_interval":180,"grace_period":120}`,
+			body: `{"user_id":"player1","time_limit":900,"oni_count":0,"area_size":"500m","sync_interval":180,"grace_period":120}`,
 		},
 		{
 			name: "oniCountFour",
-			body: `{"time_limit":900,"oni_count":4,"area_size":"500m","sync_interval":180,"grace_period":120}`,
+			body: `{"user_id":"player1","time_limit":900,"oni_count":4,"area_size":"500m","sync_interval":180,"grace_period":120}`,
 		},
 		{
 			name: "maxPlayersOne",
-			body: `{"time_limit":900,"oni_count":1,"max_players":1,"area_size":"500m","sync_interval":180,"grace_period":120}`,
+			body: `{"user_id":"player1","time_limit":900,"oni_count":1,"max_players":1,"area_size":"500m","sync_interval":180,"grace_period":120}`,
 		},
 		{
 			name: "maxPlayersSixteen",
-			body: `{"time_limit":900,"oni_count":1,"max_players":16,"area_size":"500m","sync_interval":180,"grace_period":120}`,
+			body: `{"user_id":"player1","time_limit":900,"oni_count":1,"max_players":16,"area_size":"500m","sync_interval":180,"grace_period":120}`,
 		},
 		{
 			name: "maxPlayersEqualsOniCount",
-			body: `{"time_limit":900,"oni_count":2,"max_players":2,"area_size":"500m","sync_interval":180,"grace_period":120}`,
+			body: `{"user_id":"player1","time_limit":900,"oni_count":2,"max_players":2,"area_size":"500m","sync_interval":180,"grace_period":120}`,
 		},
 		{
 			name: "invalidTimeLimit",
-			body: `{"time_limit":300,"oni_count":1,"area_size":"500m","sync_interval":180,"grace_period":120}`,
+			body: `{"user_id":"player1","time_limit":300,"oni_count":1,"area_size":"500m","sync_interval":180,"grace_period":120}`,
 		},
 		{
 			name: "invalidSyncInterval",
-			body: `{"time_limit":900,"oni_count":1,"area_size":"500m","sync_interval":90,"grace_period":120}`,
+			body: `{"user_id":"player1","time_limit":900,"oni_count":1,"area_size":"500m","sync_interval":90,"grace_period":120}`,
 		},
 		{
 			name: "invalidGracePeriod",
-			body: `{"time_limit":900,"oni_count":1,"area_size":"500m","sync_interval":180,"grace_period":30}`,
+			body: `{"user_id":"player1","time_limit":900,"oni_count":1,"area_size":"500m","sync_interval":180,"grace_period":30}`,
 		},
 		{
 			name: "invalidMissionEnabledType",
-			body: `{"time_limit":900,"oni_count":1,"area_size":"500m","sync_interval":180,"grace_period":120,"mission_enabled":"yes"}`,
+			body: `{"user_id":"player1","time_limit":900,"oni_count":1,"area_size":"500m","sync_interval":180,"grace_period":120,"mission_enabled":"yes"}`,
 		},
 	}
 
@@ -418,6 +494,7 @@ func TestPutRoomSettingsRejectsMaxPlayersBelowCurrentPlayers(t *testing.T) {
 		AreaSize:     "500m",
 		SyncInterval: 180,
 		GracePeriod:  120,
+		HostUserID:   "player1",
 	})
 	defer cleanup()
 
@@ -433,6 +510,7 @@ func TestPutRoomSettingsRejectsMaxPlayersBelowCurrentPlayers(t *testing.T) {
 	}
 
 	resp := putRoomSettingsRaw(t, server, roomID, `{
+		"user_id": "player1",
 		"time_limit": 900,
 		"oni_count": 1,
 		"max_players": 2,
@@ -492,6 +570,7 @@ func TestRoulettePendingNotClearedBySettingsUpdateAndSourceOfTruth(t *testing.T)
 
 	// 3. PUT /rooms/:id settings update (change time_limit to 1800, keep oni_count=1)
 	putRoomSettings(t, server, roomID, `{
+		"user_id": "player1",
 		"time_limit": 1800,
 		"oni_count": 1,
 		"max_players": 6,

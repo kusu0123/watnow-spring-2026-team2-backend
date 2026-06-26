@@ -2,9 +2,9 @@ package main
 
 import (
 	"errors"
+	"log"
 	"net/http"
 	"os"
-	"log"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -151,14 +151,24 @@ func setupRouter(db *gorm.DB) *gin.Engine {
 			return
 		}
 
-		// ホスト認証（後方互換性のため、user_idが送られてきた場合のみチェック）
-		if input.UserID != nil && *input.UserID != "" {
-			if room.HostUserID != "" && room.HostUserID != *input.UserID {
-				c.JSON(http.StatusForbidden, gin.H{"error": "ホストのみ設定を変更できます"})
-				return
-			}
-		} else {
-			log.Printf("[Warning] Room: %s | settings update request did not provide user_id. Proceeding without host verification for backward compatibility.", roomID)
+		if input.UserID == nil || strings.TrimSpace(*input.UserID) == "" {
+			c.JSON(http.StatusForbidden, gin.H{"error": "ホストのみ設定を変更できます"})
+			return
+		}
+		settingsUserID := strings.TrimSpace(*input.UserID)
+		// Room作成直後はhost_user_idが未確定なため、最初のjoinでhostが確定するまで設定更新を拒否する。
+		if room.HostUserID == "" || room.HostUserID != settingsUserID {
+			c.JSON(http.StatusForbidden, gin.H{"error": "ホストのみ設定を変更できます"})
+			return
+		}
+		var hostPlayerCount int64
+		if err := db.Model(&models.Player{}).Where("room_id = ? AND user_id = ?", roomID, settingsUserID).Count(&hostPlayerCount).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "プレイヤー情報の取得に失敗しました"})
+			return
+		}
+		if hostPlayerCount == 0 {
+			c.JSON(http.StatusForbidden, gin.H{"error": "ホストのみ設定を変更できます"})
+			return
 		}
 
 		// 2. その後で、受け取ったデータの中身をチェックする
