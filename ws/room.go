@@ -2,6 +2,7 @@ package ws
 
 import (
 	"log"
+	"math"
 	"sort"
 	"time"
 
@@ -208,6 +209,87 @@ func locationForSnapshot(player syncPlayerSnapshot, includeCoords bool) Location
 	return location
 }
 
+func formatGameTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339Nano)
+}
+
+func remainingSecondsForPhase(now time.Time, phase string, graceEndsAt, gameEndsAt time.Time) int {
+	var target time.Time
+	switch phase {
+	case gamePhaseGrace:
+		target = graceEndsAt
+	case gamePhaseActive:
+		target = gameEndsAt
+	case gamePhaseResult:
+		return 0
+	default:
+		return 0
+	}
+	if target.IsZero() || !target.After(now) {
+		return 0
+	}
+	return int(math.Ceil(target.Sub(now).Seconds()))
+}
+
+func (room *RoomState) activateIfGraceElapsed(now time.Time) bool {
+	room.mu.Lock()
+	defer room.mu.Unlock()
+
+	if room.Status != 1 || room.IsGameActive || room.GraceEndsAt.IsZero() || now.Before(room.GraceEndsAt) {
+		return false
+	}
+	room.IsGameActive = true
+	room.ActiveAt = room.GraceEndsAt
+	room.GamePhase = gamePhaseActive
+	return true
+}
+
+func (room *RoomState) timerSnapshot(now time.Time) OutgoingMessage {
+	room.mu.RLock()
+	gameID := room.GameID
+	gameStartedAt := room.GameStartedAt
+	graceEndsAt := room.GraceEndsAt
+	gameEndsAt := room.GameEndsAt
+	gamePhase := room.GamePhase
+	winner := room.Winner
+	endReason := room.EndReason
+	room.mu.RUnlock()
+
+	if gamePhase == "" {
+		gamePhase = gamePhaseWaiting
+	}
+	remainingSeconds := remainingSecondsForPhase(now, gamePhase, graceEndsAt, gameEndsAt)
+
+	return OutgoingMessage{
+		ServerNow:        formatGameTime(now),
+		GameID:           gameID,
+		GameStartedAt:    formatGameTime(gameStartedAt),
+		GraceEndsAt:      formatGameTime(graceEndsAt),
+		GameEndsAt:       formatGameTime(gameEndsAt),
+		GamePhase:        gamePhase,
+		RemainingSeconds: &remainingSeconds,
+		Winner:           winner,
+		EndReason:        endReason,
+	}
+}
+
+func (room *RoomState) addTimerSnapshot(msg OutgoingMessage, now time.Time) OutgoingMessage {
+	snapshot := room.timerSnapshot(now)
+	msg.ServerNow = snapshot.ServerNow
+	msg.GameID = snapshot.GameID
+	msg.GameStartedAt = snapshot.GameStartedAt
+	msg.GraceEndsAt = snapshot.GraceEndsAt
+	msg.GameEndsAt = snapshot.GameEndsAt
+	msg.GamePhase = snapshot.GamePhase
+	msg.RemainingSeconds = snapshot.RemainingSeconds
+	msg.Winner = snapshot.Winner
+	msg.EndReason = snapshot.EndReason
+	return msg
+}
+
 func (room *RoomState) syncMessageFor(viewer *Client) OutgoingMessage {
 	viewerState := snapshotClient(viewer)
 	clients := room.clientList()
@@ -233,10 +315,10 @@ func (room *RoomState) syncMessageFor(viewer *Client) OutgoingMessage {
 		return locations[i].UserID < locations[j].UserID
 	})
 
-	return OutgoingMessage{
+	return room.addTimerSnapshot(OutgoingMessage{
 		Event:     "sync",
 		Locations: locations,
-	}
+	}, time.Now())
 }
 
 func (room *RoomState) SendSyncToAll() {
@@ -259,16 +341,22 @@ func (room *RoomState) resultMessage(roomID string, db *gorm.DB) (OutgoingMessag
 	}
 
 	activeAt, endedAt := room.resultTiming()
-	return resultMessageFromPlayers(players, activeAt, endedAt), nil
+	return room.addTimerSnapshot(resultMessageFromPlayers(players, activeAt, endedAt), time.Now()), nil
 }
 
 func (room *RoomState) resultTiming() (time.Time, time.Time) {
 	room.mu.RLock()
 	activeAt := room.ActiveAt
 	timeLimit := room.TimeLimit
+	gameEndsAt := room.GameEndsAt
+	endReason := room.EndReason
 	room.mu.RUnlock()
 
 	endedAt := time.Now()
+	if endReason == endReasonTimeUp && !gameEndsAt.IsZero() {
+		endedAt = gameEndsAt
+		return activeAt, endedAt
+	}
 	if !activeAt.IsZero() && timeLimit > 0 {
 		limitEnd := activeAt.Add(time.Duration(timeLimit) * time.Second)
 		if endedAt.After(limitEnd) {
@@ -347,7 +435,7 @@ func (room *RoomState) resultMessageFromClients() OutgoingMessage {
 	})
 
 	activeAt, endedAt := room.resultTiming()
-	return resultMessageFromPlayers(players, activeAt, endedAt)
+	return room.addTimerSnapshot(resultMessageFromPlayers(players, activeAt, endedAt), time.Now())
 }
 
 func (room *RoomState) resultMessageBestEffort(roomID string, db *gorm.DB) OutgoingMessage {
@@ -397,42 +485,56 @@ func (room *RoomState) allConnectedRunnersCaught() bool {
 	return hasRunner && allCaught
 }
 
-func (room *RoomState) shouldEnd(now time.Time, roomID string, db *gorm.DB) bool {
+func (room *RoomState) shouldEnd(now time.Time, roomID string, db *gorm.DB) (bool, string) {
 	room.mu.RLock()
 	if room.Status != 1 || !room.IsGameActive {
 		room.mu.RUnlock()
-		return false
+		return false, ""
 	}
 
-	if room.TimeLimit <= 0 || !now.Before(room.ActiveAt.Add(time.Duration(room.TimeLimit)*time.Second)) {
+	if room.TimeLimit <= 0 || (!room.GameEndsAt.IsZero() && !now.Before(room.GameEndsAt)) || (room.GameEndsAt.IsZero() && !now.Before(room.ActiveAt.Add(time.Duration(room.TimeLimit)*time.Second))) {
 		room.mu.RUnlock()
-		return true
+		return true, endReasonTimeUp
 	}
 	room.mu.RUnlock()
 
 	allCaught, err := allRunnersCaughtInDB(db, roomID)
 	if err != nil {
 		log.Printf("[Error] Room: %s | 終了判定に失敗しました: %v\n", roomID, err)
-		return room.allConnectedRunnersCaught()
+		if room.allConnectedRunnersCaught() {
+			return true, endReasonAllCaught
+		}
+		return false, ""
 	}
-	return allCaught
+	if allCaught {
+		return true, endReasonAllCaught
+	}
+	return false, ""
 }
 
-func (room *RoomState) finish(roomID string, db *gorm.DB) bool {
-	resultMessage := room.resultMessageBestEffort(roomID, db)
-
+func (room *RoomState) finish(roomID string, db *gorm.DB, endReason string) bool {
 	room.mu.Lock()
 	if room.Status != 1 {
 		room.mu.Unlock()
 		return false
 	}
+	if endReason == "" {
+		endReason = endReasonAllCaught
+	}
+	winner := winnerOni
+	if endReason == endReasonTimeUp {
+		winner = winnerRunners
+	}
 	room.Status = 2
 	room.IsGameActive = false
 	room.IsGMLoopActive = false
-	room.StartAt = time.Time{}
-	room.ActiveAt = time.Time{}
+	room.GamePhase = gamePhaseResult
+	room.Winner = winner
+	room.EndReason = endReason
 	room.LoopID++
 	room.mu.Unlock()
+
+	resultMessage := room.resultMessageBestEffort(roomID, db)
 
 	if err := db.Model(&models.Room{}).Where("id = ?", roomID).Update("status", 2).Error; err != nil {
 		log.Printf("[Error] Room: %s | 終了状態の保存に失敗しました: %v\n", roomID, err)
@@ -445,10 +547,22 @@ func (room *RoomState) finish(roomID string, db *gorm.DB) bool {
 	return true
 }
 
-func runGameLoop(roomID string, room *RoomState, db *gorm.DB, loopID uint64) {
+func (room *RoomState) finishIfExpired(roomID string, db *gorm.DB, now time.Time) bool {
+	room.activateIfGraceElapsed(now)
+
+	room.mu.RLock()
+	expired := room.Status == 1 && !room.GameEndsAt.IsZero() && !now.Before(room.GameEndsAt)
+	room.mu.RUnlock()
+	if !expired {
+		return false
+	}
+	return room.finish(roomID, db, endReasonTimeUp)
+}
+
+func runGameLoop(roomID string, room *RoomState, db *gorm.DB, loopID uint64, gameID string) {
 	defer func() {
 		room.mu.Lock()
-		if room.LoopID == loopID {
+		if room.LoopID == loopID && room.GameID == gameID {
 			room.IsGMLoopActive = false
 		}
 		room.mu.Unlock()
@@ -465,40 +579,47 @@ func runGameLoop(roomID string, room *RoomState, db *gorm.DB, loopID uint64) {
 		room.mu.RLock()
 		status := room.Status
 		currentLoopID := room.LoopID
+		currentGameID := room.GameID
 		hasClients := len(room.Clients) > 0
 		isGameActive := room.IsGameActive
-		startAt := room.StartAt
+		graceEndsAt := room.GraceEndsAt
 		syncInterval := room.SyncInterval
 		activeAt := room.ActiveAt
 		room.mu.RUnlock()
 
-		if status != 1 || currentLoopID != loopID || !hasClients {
+		if status != 1 || currentLoopID != loopID || currentGameID != gameID || !hasClients {
 			return
 		}
 
-		if !isGameActive && !now.Before(startAt) {
+		if !isGameActive && !now.Before(graceEndsAt) {
 			room.mu.Lock()
-			if room.Status != 1 || room.LoopID != loopID || len(room.Clients) == 0 {
+			if room.Status != 1 || room.LoopID != loopID || room.GameID != gameID || len(room.Clients) == 0 {
 				room.mu.Unlock()
 				return
 			}
 			if !room.IsGameActive {
 				room.IsGameActive = true
-				room.ActiveAt = now
-				activeAt = now
+				room.ActiveAt = room.GraceEndsAt
+				room.GamePhase = gamePhaseActive
+				activeAt = room.ActiveAt
 				isGameActive = true
 			}
 			syncInterval = room.SyncInterval
 			room.mu.Unlock()
 
 			nextSyncAt = activeAt.Add(time.Duration(syncInterval) * time.Second)
-			room.Broadcast(OutgoingMessage{Event: "game_active"})
+			room.Broadcast(room.addTimerSnapshot(OutgoingMessage{Event: "game_active"}, time.Now()))
 			room.SendSyncToAll()
 		}
 
 		if isGameActive {
-			if room.shouldEnd(now, roomID, db) {
-				room.finish(roomID, db)
+			if shouldEnd, endReason := room.shouldEnd(now, roomID, db); shouldEnd {
+				room.mu.RLock()
+				canFinish := room.LoopID == loopID && room.GameID == gameID
+				room.mu.RUnlock()
+				if canFinish {
+					room.finish(roomID, db, endReason)
+				}
 				return
 			}
 
