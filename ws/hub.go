@@ -85,6 +85,7 @@ type RouletteState struct {
 	Status            string
 	RouletteOrder     []string
 	PendingOniUserIDs []string
+	RevealedOniCount  int
 	StartedAt         *time.Time
 	StoppedAt         *time.Time
 }
@@ -480,7 +481,7 @@ func rouletteSpinStartedMessage(sessionID string, spinID int, order []string, st
 	}
 }
 
-func rouletteSpinStoppedMessage(sessionID string, spinID int, order []string, selectedOniUserIDs []string, startsAt, stopAt time.Time) OutgoingMessage {
+func rouletteSpinStoppedMessage(sessionID string, spinID int, order []string, selectedOniUserIDs []string, revealedOniCount int, startsAt, stopAt time.Time) OutgoingMessage {
 	if stopAt.IsZero() {
 		stopAt = time.Now().UTC()
 	}
@@ -488,15 +489,32 @@ func rouletteSpinStoppedMessage(sessionID string, spinID int, order []string, se
 	if !startsAt.IsZero() {
 		startsAtText = startsAt.UTC().Format(time.RFC3339Nano)
 	}
+	selectedOniUserID := ""
+	if len(selectedOniUserIDs) > 0 {
+		selectedOniUserID = selectedOniUserIDs[0]
+	}
 	return OutgoingMessage{
 		Event:              "roulette_spin_stopped",
 		RouletteSessionID:  sessionID,
 		SpinID:             spinID,
 		RouletteOrder:      copyStrings(order),
 		StartsAt:           startsAtText,
+		SelectedOniUserID:  selectedOniUserID,
 		SelectedOniUserIDs: copyStrings(selectedOniUserIDs),
+		RevealedOniCount:   revealedOniCount,
 		StopAt:             stopAt.UTC().Format(time.RFC3339Nano),
 		DecelerationMS:     rouletteDecelerationMS,
+	}
+}
+
+func rouletteRevealNextMessage(sessionID string, revealIndex int, selectedOniUserID string, selectedOniUserIDs []string, revealedOniCount int) OutgoingMessage {
+	return OutgoingMessage{
+		Event:              "roulette_reveal_next",
+		RouletteSessionID:  sessionID,
+		RevealIndex:        &revealIndex,
+		SelectedOniUserID:  selectedOniUserID,
+		RevealedOniCount:   revealedOniCount,
+		SelectedOniUserIDs: copyStrings(selectedOniUserIDs),
 	}
 }
 
@@ -516,6 +534,7 @@ func rouletteSnapshotMessagesLocked(room *RoomState) []OutgoingMessage {
 	spinID := room.Roulette.SpinID
 	order := copyStrings(room.Roulette.RouletteOrder)
 	selectedOniUserIDs := copyStrings(room.Roulette.PendingOniUserIDs)
+	revealedOniCount := room.Roulette.RevealedOniCount
 	startedAt := time.Time{}
 	if room.Roulette.StartedAt != nil {
 		startedAt = *room.Roulette.StartedAt
@@ -532,7 +551,7 @@ func rouletteSnapshotMessagesLocked(room *RoomState) []OutgoingMessage {
 	case rouletteStatusSpinning:
 		return append(messages, rouletteSpinStartedMessage(sessionID, spinID, order, startedAt))
 	case rouletteStatusStopped:
-		return append(messages, rouletteSpinStoppedMessage(sessionID, spinID, order, selectedOniUserIDs, startedAt, stoppedAt))
+		return append(messages, rouletteSpinStoppedMessage(sessionID, spinID, order, selectedOniUserIDs, revealedOniCount, startedAt, stoppedAt))
 	default:
 		return nil
 	}
@@ -1395,6 +1414,7 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 			startsAt := time.Now().UTC()
 			room.Roulette.Status = rouletteStatusSpinning
 			room.Roulette.PendingOniUserIDs = nil
+			room.Roulette.RevealedOniCount = 0
 			room.Roulette.StartedAt = timePtr(startsAt)
 			room.Roulette.StoppedAt = nil
 			rouletteMessage := rouletteSpinStartedMessage(room.Roulette.SessionID, room.Roulette.SpinID, room.Roulette.RouletteOrder, startsAt)
@@ -1452,12 +1472,75 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 			stoppedAt := time.Now().UTC()
 			room.Roulette.Status = rouletteStatusStopped
 			room.Roulette.PendingOniUserIDs = copyStrings(selectedOniUserIDs)
+			room.Roulette.RevealedOniCount = 1
 			room.Roulette.StoppedAt = timePtr(stoppedAt)
 			startedAt := time.Time{}
 			if room.Roulette.StartedAt != nil {
 				startedAt = *room.Roulette.StartedAt
 			}
-			rouletteMessage := rouletteSpinStoppedMessage(room.Roulette.SessionID, room.Roulette.SpinID, room.Roulette.RouletteOrder, selectedOniUserIDs, startedAt, stoppedAt)
+			rouletteMessage := rouletteSpinStoppedMessage(room.Roulette.SessionID, room.Roulette.SpinID, room.Roulette.RouletteOrder, selectedOniUserIDs, room.Roulette.RevealedOniCount, startedAt, stoppedAt)
+			room.mu.Unlock()
+
+			room.Broadcast(rouletteMessage)
+
+		case "roulette_reveal_next":
+			userID, playerID := joinedClientIdentity(client)
+			if userID == "" || playerID == "" {
+				sendError(client, "先に入室してください")
+				continue
+			}
+			if !room.isHost(userID) {
+				sendError(client, "ホストのみ実行できます")
+				continue
+			}
+			if msg.RouletteSessionID == "" {
+				sendError(client, "ルーレットセッションIDがありません")
+				continue
+			}
+
+			room.mu.Lock()
+			if room.Status != 0 {
+				room.mu.Unlock()
+				sendError(client, "鬼追加発表は待機中のみ実行できます")
+				continue
+			}
+			if room.Roulette.SessionID == "" || room.Roulette.SessionID != msg.RouletteSessionID {
+				room.mu.Unlock()
+				sendError(client, "ルーレットセッションが見つかりません")
+				continue
+			}
+			if room.Roulette.Status != rouletteStatusStopped {
+				room.mu.Unlock()
+				sendError(client, "ルーレットは停止していません")
+				continue
+			}
+			if len(room.Roulette.PendingOniUserIDs) == 0 {
+				room.mu.Unlock()
+				sendError(client, "発表する鬼が決定されていません")
+				continue
+			}
+			if len(room.Roulette.PendingOniUserIDs) != room.OniCount {
+				room.mu.Unlock()
+				sendError(client, "決定済みの鬼人数が設定と一致しません")
+				continue
+			}
+			if room.Roulette.RevealedOniCount < 1 {
+				room.mu.Unlock()
+				sendError(client, "ルーレット停止後の発表状態が不正です")
+				continue
+			}
+			if room.Roulette.RevealedOniCount >= len(room.Roulette.PendingOniUserIDs) {
+				room.mu.Unlock()
+				sendError(client, "未発表の鬼はいません")
+				continue
+			}
+
+			revealIndex := room.Roulette.RevealedOniCount
+			selectedOniUserID := room.Roulette.PendingOniUserIDs[revealIndex]
+			room.Roulette.RevealedOniCount++
+			revealedOniCount := room.Roulette.RevealedOniCount
+			selectedOniUserIDs := copyStrings(room.Roulette.PendingOniUserIDs)
+			rouletteMessage := rouletteRevealNextMessage(room.Roulette.SessionID, revealIndex, selectedOniUserID, selectedOniUserIDs, revealedOniCount)
 			room.mu.Unlock()
 
 			room.Broadcast(rouletteMessage)
@@ -1490,6 +1573,7 @@ func ServeWs(c *gin.Context, db *gorm.DB) {
 			}
 			room.Roulette.Status = rouletteStatusReady
 			room.Roulette.PendingOniUserIDs = nil
+			room.Roulette.RevealedOniCount = 0
 			room.Roulette.StartedAt = nil
 			room.Roulette.StoppedAt = nil
 			rouletteMessage := rouletteResetMessage(room.Roulette.SessionID)

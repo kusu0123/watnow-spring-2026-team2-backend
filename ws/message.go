@@ -34,6 +34,9 @@ type OutgoingMessage struct {
 	AreaCenter         *AreaCenterVal     `json:"area_center,omitempty"`
 	OniUsers           []string           `json:"oni_users,omitempty"`
 	SelectedOniUserIDs []string           `json:"selected_oni_user_ids,omitempty"`
+	SelectedOniUserID  string             `json:"selected_oni_user_id,omitempty"`
+	RevealIndex        *int               `json:"reveal_index,omitempty"`
+	RevealedOniCount   int                `json:"revealed_oni_count,omitempty"`
 	RouletteSessionID  string             `json:"roulette_session_id,omitempty"`
 	SpinID             int                `json:"spin_id,omitempty"`
 	RouletteOrder      []string           `json:"roulette_order,omitempty"`
